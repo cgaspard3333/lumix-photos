@@ -29,9 +29,26 @@ Téléchargez l'APK de la dernière version dans les
 - Les fichiers sont rangés dans `DCIM/Lumix/Image` et `DCIM/Lumix/Video`, avec la bonne date de
   prise de vue.
 
+## Prise de vue à distance
+
+Après la connexion, l'appli propose « Prise de vue » ou « Photos et vidéos » (la carte n'est lue que
+dans le second cas) ; on passe de l'un à l'autre à tout moment.
+
+- Visée en direct plein écran (640×432, ~30 images/s), redressée quand l'appareil est tenu à la
+  verticale ; toucher l'image fait la mise au point
+- Déclencheur, vidéo avec chronomètre, zoom par boutons ou en pinçant la visée, jauge de zoom
+- Position de la molette affichée ; réglages disponibles lus sur l'appareil, valeurs relues chaque
+  seconde (changements faits sur l'appareil compris)
+- Molette virtuelle : appui long sur un réglage puis glisser à gauche / droite
+- Dispositions portrait et paysage, téléphone et tablette
+
+Pendant une vidéo pilotée en Wi-Fi, le FZ1000 bloque ses propres commandes : zoom et mise au point
+se font alors depuis l'appli.
+
 ## Ce que l'appli fait (et ne fait pas) sur l'appareil
 
 Elle ne fait **que lire** la carte SD : aucune suppression ni modification des fichiers de l'appareil.
+En prise de vue, elle change les réglages qu'on lui demande de changer, et rien d'autre.
 
 ## Particularités des Lumix découvertes en route
 
