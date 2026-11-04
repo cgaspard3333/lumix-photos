@@ -378,8 +378,8 @@ private fun Gallery.itemsBetween(a: Int, b: Int): List<CameraItem> =
     (min(a, b)..max(a, b)).mapNotNull { (entries.getOrNull(it) as? FileEntry)?.item }
 
 /**
- * Appui long : sans bouger, coche le fichier (et passe en mode sélection) ; en glissant,
- * sélectionne (ou désélectionne) tous les fichiers entre le premier et celui sous le doigt.
+ * Appui long : coche le fichier dès la fin du délai (et passe en mode sélection) ; en glissant
+ * ensuite, sélectionne (ou désélectionne) tous les fichiers entre le premier et celui sous le doigt.
  */
 @Composable
 private fun Modifier.selectionGestures(
@@ -435,8 +435,16 @@ private fun Modifier.selectionGestures(
             }
             if (interrupted != null) return@awaitEachGesture
 
+            // Dès la fin du délai d'appui long, sans attendre que le doigt se lève : le fichier est
+            // coché (ou décoché) et on passe en mode sélection. Glisser ensuite étend la même action.
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            var dragging = false
+            val selection = DragSelection(
+                anchor = start,
+                base = currentState.selected,
+                select = startItem.id !in currentState.selected,
+            ).also { it.current = start }
+            vm.dragSelect(selection.base, listOf(startItem), selection.select)
+            drag = selection
             pointer = down.position
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -445,27 +453,15 @@ private fun Modifier.selectionGestures(
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 if (!change.pressed) break
                 pointer = change.position
-                if (!dragging && itemAt(pointer).let { it != null && it != start }) {
-                    dragging = true
-                    drag = DragSelection(
-                        anchor = start,
-                        base = currentState.selected,
-                        select = startItem.id !in currentState.selected,
-                    )
+                autoScroll = when {
+                    pointer.y < edge -> -(edge - pointer.y) / 3
+                    pointer.y > size.height - edge -> (pointer.y - (size.height - edge)) / 3
+                    else -> 0f
                 }
-                if (dragging) {
-                    autoScroll = when {
-                        pointer.y < edge -> -(edge - pointer.y) / 3
-                        pointer.y > size.height - edge -> (pointer.y - (size.height - edge)) / 3
-                        else -> 0f
-                    }
-                    updateDrag()
-                }
+                updateDrag()
             }
             autoScroll = 0f
             drag = null
-            // Appui long sans glisser : passe en mode sélection avec ce fichier coché
-            if (!dragging) vm.toggle(startItem)
         }
     }
 }
