@@ -763,7 +763,9 @@ private fun ZoomButton(remote: RemoteController, tele: Boolean) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet, onChange: (Sheet) -> Unit, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = sheet is Sheet.All)) {
+    // Toujours ouverte en entier : la position « à mi-hauteur » est recalculée à chaque rafraîchissement
+    // des valeurs (chaque seconde) et faisait sautiller la feuille
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         when (sheet) {
             Sheet.All -> LazyColumn(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                 item(key = "hint") {
@@ -802,7 +804,8 @@ private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet
             }
             is Sheet.One -> {
                 val setting = r.settings.firstOrNull { it.id == sheet.settingId } ?: return@ModalBottomSheet
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+                // Défilable : sinon glisser vers le haut déplace la feuille au lieu de parcourir les valeurs
+                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { onChange(Sheet.All) }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Tous les réglages") }
                         Text(setting.title, style = MaterialTheme.typography.titleLarge)
