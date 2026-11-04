@@ -245,7 +245,11 @@ private fun Modifier.sharpened(scale: Float): Modifier {
         shader.setFloatUniform("amount", 0.4f)
         android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
     }
-    return graphicsLayer { renderEffect = effect }
+    // Sans découpage, l'effet étire les pixels du bord de l'image sur tout le reste de l'écran
+    return graphicsLayer {
+        clip = true
+        renderEffect = effect
+    }
 }
 
 private const val SHARPEN_SHADER = """
