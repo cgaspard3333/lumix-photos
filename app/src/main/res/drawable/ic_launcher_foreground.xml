@@ -1,13 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Appareil photo, dans la zone sûre (66 dp centrés) des icônes adaptatives -->
+<!-- Appareil photo qui émet en Wi-Fi, dans la zone sûre (66 dp centrés) des icônes adaptatives -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Boîtier, objectif (anneau évidé) et flash -->
     <path
         android:fillColor="#FFFFFFFF"
         android:fillType="evenOdd"
-        android:pathData="M34,42h8l4,-6h16l4,6h8a4,4 0,0 1,4 4v24a4,4 0,0 1,-4 4h-40a4,4 0,0 1,-4 -4v-24a4,4 0,0 1,4 -4z
-            M43,57a11,11 0,1 0,22 0a11,11 0,1 0,-22 0z
-            M48,57a6,6 0,1 0,12 0a6,6 0,1 0,-12 0z
-            M69,47a2.5,2.5 0,1 0,5 0a2.5,2.5 0,1 0,-5 0z" />
+        android:pathData="M30,50h6l4,-6h16l4,6h6a5,5 0,0 1,5 5v22a5,5 0,0 1,-5 5h-36a5,5 0,0 1,-5 -5v-22a5,5 0,0 1,5 -5z
+            M37,66a11,11 0,1 0,22 0a11,11 0,1 0,-22 0z
+            M42,66a6,6 0,1 0,12 0a6,6 0,1 0,-12 0z
+            M61,57a2.5,2.5 0,1 0,5 0a2.5,2.5 0,1 0,-5 0z" />
+    <!-- Ondes Wi-Fi -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M66,44m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4.2"
+        android:strokeLineCap="round"
+        android:pathData="M74.88,42.61A9,9 0,0 0,67.56 35.14
+            M80.79,41.57A15,15 0,0 0,68.6 29.23
+            M86.7,40.53A21,21 0,0 0,69.65 23.32" />
 </vector>
