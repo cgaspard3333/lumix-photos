@@ -1,5 +1,8 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.core.view.WindowInsetsControllerCompat
@@ -98,6 +101,9 @@ import kotlin.math.ln
 import androidx.compose.animation.core.animateFloatAsState
 
 /** Réglages proposés en accès direct sous la visée, dans cet ordre quand l'appareil les propose. */
+/** Largeur libre (total des deux bandes) à partir de laquelle infos et jauge passent à côté de la visée. */
+private val SIDE_COLUMNS_MIN = 110.dp
+
 /** Hauteurs approximatives des bandeaux posés sur la visée en paysage. */
 private val TOP_OVERLAY = 56.dp
 private val BOTTOM_OVERLAY = 104.dp
@@ -179,7 +185,37 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
             BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()) {
                 val landscape = maxWidth > maxHeight
                 val shortScreen = maxHeight < 500.dp
-                if (landscape) {
+                val frame by remote.frame.collectAsStateWithLifecycle()
+                val ratio = frame?.let { it.width.toFloat() / it.height } ?: (3f / 2f)
+                val controlsWidth = if (shortScreen) 96.dp else 132.dp
+                // Largeur laissée libre à côté d'une visée pleine hauteur (téléphone en paysage)
+                val spare = maxWidth - controlsWidth - maxHeight * ratio
+                if (landscape && spare >= SIDE_COLUMNS_MIN) {
+                    // Les bandes noires de part et d'autre de l'image (téléphone en paysage) servent :
+                    // infos et exposition à gauche, jauge de zoom à droite près des boutons de zoom
+                    val side = spare / 2
+                    Row(Modifier.fillMaxSize()) {
+                        InfoColumn(r, s, vm, open = { sheet = it }, modifier = Modifier.width(side).fillMaxHeight())
+                        Box(Modifier.fillMaxHeight().aspectRatio(ratio)) {
+                            LiveView(remote, r, flash.value, Modifier.fillMaxSize(), showGauge = false)
+                            Box(
+                                Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .fillMaxWidth()
+                                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f)))),
+                            ) { QuickSettings(r) { sheet = it } }
+                        }
+                        val focal by remote.focal.collectAsStateWithLifecycle()
+                        val target by remote.zoomTarget.collectAsStateWithLifecycle()
+                        Box(Modifier.width(side).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                            val range = r.zoomRange
+                            if (focal != null && range != null) {
+                                VerticalZoomGauge(focal!!, target, range, Modifier.fillMaxWidth().fillMaxHeight(0.8f))
+                            }
+                        }
+                        Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(controlsWidth).fillMaxHeight())
+                    }
+                } else if (landscape) {
                     // Visée sur toute la hauteur ; infos et raccourcis par-dessus, sur un dégradé sombre
                     Row(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -204,7 +240,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                                 QuickSettings(r) { sheet = it }
                             }
                         }
-                        Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(if (shortScreen) 104.dp else 132.dp).fillMaxHeight())
+                        Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(controlsWidth).fillMaxHeight())
                     }
                 } else {
                     Column(Modifier.fillMaxSize()) {
@@ -224,8 +260,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
 
 @Composable
 private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
-    // Sur un écran étroit (téléphone en portrait), tout tient sur une ligne : titre masqué,
-    // badge réduit au sigle du mode, autonomie en abrégé
+    // Sigle du mode seulement ; sur un écran étroit (téléphone en portrait), autonomie en abrégé
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compact = maxWidth < 600.dp
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -234,10 +269,8 @@ private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
                 Box(Modifier.size(10.dp).background(Color.Red, CircleShape))
                 Spacer(Modifier.width(6.dp))
                 Text(formatClock(r.recordSeconds), fontWeight = FontWeight.SemiBold, color = Color.Red)
-            } else if (!compact) {
-                Text("Prise de vue", style = MaterialTheme.typography.titleMedium)
             }
-            r.mode?.let { ModeBadge(it, withLabel = !compact) }
+            r.mode?.let { ModeBadge(it, withLabel = false) }
             Spacer(Modifier.weight(1f))
             val parts = buildList {
                 r.photosLeft?.let { add(if (compact) "$it ph." else "$it photos") }
@@ -258,10 +291,9 @@ private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
 
 /** Position de la molette, ex. « M  Manuel ». */
 @Composable
-private fun ModeBadge(mode: ShootingMode, withLabel: Boolean = true) {
+private fun ModeBadge(mode: ShootingMode, withLabel: Boolean = true, modifier: Modifier = Modifier.padding(start = 12.dp)) {
     Row(
-        Modifier
-            .padding(start = 12.dp)
+        modifier
             .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(8.dp))
             .padding(horizontal = 10.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -332,6 +364,94 @@ private fun ZoomGauge(focal: Int, target: Int?, range: IntRange, compact: Boolea
     }
 }
 
+/**
+ * Colonne de gauche (téléphone en paysage) : galerie, mode, batterie, autonomie et exposition
+ * empilées. Toucher une valeur d'exposition ouvre son réglage quand il est modifiable.
+ */
+@Composable
+private fun InfoColumn(r: RemoteState, s: UiState, vm: CameraSession, open: (Sheet) -> Unit, modifier: Modifier) {
+    Column(
+        modifier.verticalScroll(rememberScrollState()).padding(vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        IconButton(onClick = vm::exitRemote) { Icon(Icons.Outlined.PhotoLibrary, "Photos et vidéos de la carte") }
+        if (r.recording) {
+            Box(Modifier.size(10.dp).background(Color.Red, CircleShape))
+            Text(formatClock(r.recordSeconds), fontWeight = FontWeight.SemiBold, color = Color.Red)
+        } else {
+            r.mode?.let { ModeBadge(it, withLabel = false, modifier = Modifier) }
+        }
+        s.battery?.let { BatteryIcon(it, Color.White.copy(alpha = 0.85f)) }
+        r.photosLeft?.let { Text("$it", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f)) }
+        Spacer(Modifier.height(4.dp))
+        val byId = r.settings.associateBy { it.id }
+        for (id in listOf("aperture", "shutter", ISO, EXPOSURE)) {
+            val setting = byId[id] ?: continue
+            val label = r.currentLabel(setting).let { if (id == ISO) "ISO\n$it" else if (id == EXPOSURE) "$it IL" else it }
+            if (label.contains("—")) continue
+            val editable = r.isEditable(setting)
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+                color = Color.White.copy(alpha = if (editable) 1f else 0.6f),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = editable) { open(Sheet.One(id)) }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+        }
+        IconButton(onClick = { open(Sheet.All) }, enabled = r.settings.isNotEmpty()) { Icon(Icons.Default.Tune, "Tous les réglages") }
+    }
+}
+
+/** Jauge de zoom verticale, rangée dans la bande noire à côté de l'image : télé en haut. */
+@Composable
+private fun VerticalZoomGauge(focal: Int, target: Int?, range: IntRange, modifier: Modifier) {
+    fun position(f: Int) = (ln(f.toFloat() / range.first) / ln(range.last.toFloat() / range.first)).coerceIn(0f, 1f)
+    val animated by animateFloatAsState(position(focal), label = "zoom")
+    val factor = focal.toFloat() / range.first
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("$focal", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = Color.White)
+        Text("mm", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
+        Text(
+            "×" + if (factor < 9.95f) "%.1f".format(factor).replace('.', ',') else factor.roundToInt().toString(),
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("${range.last}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
+        BoxWithConstraints(
+            Modifier
+                .padding(vertical = 4.dp)
+                .weight(1f)
+                .width(6.dp)
+                .background(Color.White.copy(alpha = 0.25f), CircleShape),
+        ) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .fillMaxHeight(animated.coerceAtLeast(0.02f))
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
+            // Repère de la focale visée pendant un pincement
+            target?.let { t ->
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = maxHeight * (1 - position(t)) - 2.dp)
+                        .size(width = 14.dp, height = 4.dp)
+                        .background(Color.White, RoundedCornerShape(2.dp)),
+                )
+            }
+        }
+        Text("${range.first}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
+    }
+}
+
 /** Rappel d'exposition, comme sur l'écran de l'appareil : aussi les valeurs qu'il choisit lui-même. */
 @Composable
 private fun ExposureReadout(r: RemoteState) {
@@ -365,6 +485,8 @@ private fun LiveView(
     overlayInsets: PaddingValues = PaddingValues(),
     /** Jauge de zoom réduite (écran peu haut, ex. téléphone en paysage). */
     compactGauge: Boolean = false,
+    /** Jauge affichée ailleurs (panneau latéral) : rien sur la visée. */
+    showGauge: Boolean = true,
 ) {
     val frame by remote.frame.collectAsStateWithLifecycle()
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
@@ -385,6 +507,22 @@ private fun LiveView(
         val w = if (boxRatio > ratio) constraints.maxHeight * ratio else constraints.maxWidth.toFloat()
         val h = w / ratio
         val density = LocalDensity.current
+        val focal by remote.focal.collectAsStateWithLifecycle()
+        val target by remote.zoomTarget.collectAsStateWithLifecycle()
+        val range = r.zoomRange
+        // Bande noire à gauche de l'image (téléphone en paysage, appareil tenu à la verticale) :
+        // la jauge s'y range à la verticale au lieu de recouvrir l'image
+        val sideMargin = with(density) { ((constraints.maxWidth - w) / 2).toDp() }
+        val gaugeAside = sideMargin >= 64.dp
+        if (showGauge && gaugeAside && focal != null && range != null) {
+            VerticalZoomGauge(
+                focal!!, target, range,
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .width(sideMargin)
+                    .fillMaxHeight(0.7f),
+            )
+        }
         Box(
             Modifier
                 .size(with(density) { w.toDp() }, with(density) { h.toDp() })
@@ -417,10 +555,7 @@ private fun LiveView(
                         .border(2.dp, Color(0xFFFFD54F), RoundedCornerShape(6.dp)),
                 )
             }
-            val focal by remote.focal.collectAsStateWithLifecycle()
-            val target by remote.zoomTarget.collectAsStateWithLifecycle()
-            val range = r.zoomRange
-            if (focal != null && range != null) {
+            if (showGauge && !gaugeAside && focal != null && range != null) {
                 ZoomGauge(
                     focal!!, target, range,
                     // Visée étroite (téléphone) : jauge plus petite pour ne pas masquer l'image
