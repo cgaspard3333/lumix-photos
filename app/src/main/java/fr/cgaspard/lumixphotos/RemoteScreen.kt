@@ -377,6 +377,20 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
             if (focal != null && range != null) {
                 ZoomGauge(focal!!, target, range, Modifier.align(Alignment.BottomCenter).padding(12.dp))
             }
+            // Pendant une vidéo pilotée en Wi-Fi, le FZ1000 bloque ses propres commandes
+            if (r.recording) {
+                Text(
+                    "Commandes de l'appareil bloquées pendant la vidéo : zoomez (pincer, + −) et touchez l'image pour la mise au point",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(12.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
             if (flash > 0f) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = flash)))
         }
     }
