@@ -5,7 +5,7 @@
     android:viewportWidth="108" android:viewportHeight="108">
     <!-- Boîtier, objectif (anneau évidé) et flash -->
     <path
-        android:fillColor="#FFFFFFFF"
+        android:fillColor="#FFF5F5F5"
         android:fillType="evenOdd"
         android:pathData="M30,50h6l4,-6h16l4,6h6a5,5 0,0 1,5 5v22a5,5 0,0 1,-5 5h-36a5,5 0,0 1,-5 -5v-22a5,5 0,0 1,5 -5z
             M37,66a11,11 0,1 0,22 0a11,11 0,1 0,-22 0z
@@ -13,10 +13,10 @@
             M61,57a2.5,2.5 0,1 0,5 0a2.5,2.5 0,1 0,-5 0z" />
     <!-- Ondes Wi-Fi -->
     <path
-        android:fillColor="#FFFFFFFF"
+        android:fillColor="#FFF5F5F5"
         android:pathData="M66,44m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0" />
     <path
-        android:strokeColor="#FFFFFFFF"
+        android:strokeColor="#FFF5F5F5"
         android:strokeWidth="4.2"
         android:strokeLineCap="round"
         android:pathData="M74.88,42.61A9,9 0,0 0,67.56 35.14

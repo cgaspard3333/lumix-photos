@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Dégradé rouge Lumix -->
+<!-- Dégradé gris anthracite vers noir -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp"
@@ -10,8 +10,8 @@
                 android:type="linear"
                 android:startX="0" android:startY="0"
                 android:endX="108" android:endY="108"
-                android:startColor="#FFE53935"
-                android:endColor="#FF8E0F0B" />
+                android:startColor="#FF34353A"
+                android:endColor="#FF0E0E10" />
         </aapt:attr>
     </path>
 </vector>
