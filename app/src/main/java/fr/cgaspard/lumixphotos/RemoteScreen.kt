@@ -157,6 +157,7 @@ private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
         } else {
             Text("Prise de vue", style = MaterialTheme.typography.titleMedium)
         }
+        r.mode?.let { ModeBadge(it) }
         Spacer(Modifier.weight(1f))
         val parts = buildList {
             r.photosLeft?.let { add("$it photos") }
@@ -169,6 +170,22 @@ private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
             color = if (s.battery?.low == true) MaterialTheme.colorScheme.error else Color.White.copy(alpha = 0.75f),
             modifier = Modifier.padding(end = 12.dp),
         )
+    }
+}
+
+/** Position de la molette, ex. « M  Manuel ». */
+@Composable
+private fun ModeBadge(mode: ShootingMode) {
+    Row(
+        Modifier
+            .padding(start = 12.dp)
+            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(mode.short, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        Spacer(Modifier.width(6.dp))
+        Text(mode.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
     }
 }
 
@@ -277,15 +294,20 @@ private fun QuickSettings(r: RemoteState, open: (Sheet) -> Unit) {
     ) {
         for (id in QUICK_SETTINGS) {
             val setting = byId[id] ?: continue
+            // Grisé quand la molette ne permet pas de le changer (la valeur choisie par l'appareil reste affichée)
             AssistChip(
                 onClick = { open(Sheet.One(id)) },
+                enabled = r.isEditable(setting),
                 label = {
                     Column(Modifier.padding(vertical = 4.dp)) {
                         Text(setting.title, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
                         Text(r.currentLabel(setting), style = MaterialTheme.typography.labelLarge)
                     }
                 },
-                colors = AssistChipDefaults.assistChipColors(labelColor = Color.White),
+                colors = AssistChipDefaults.assistChipColors(
+                    labelColor = Color.White,
+                    disabledLabelColor = Color.White.copy(alpha = 0.4f),
+                ),
             )
         }
         AssistChip(
@@ -400,7 +422,7 @@ private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet
                     }
                     for (setting in settings) {
                         item(key = setting.id) {
-                            val usable = setting.options.any { r.isEnabled(it) }
+                            val usable = r.isEditable(setting)
                             ListItem(
                                 headlineContent = { Text(setting.title) },
                                 supportingContent = { Text(if (usable) r.currentLabel(setting) else "Indisponible dans ce mode") },
@@ -425,7 +447,7 @@ private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet
                             FilterChip(
                                 selected = r.isSelected(setting, option),
                                 onClick = { remote.set(setting, option) },
-                                enabled = r.isEnabled(option),
+                                enabled = r.isEditable(setting) && r.isEnabled(option),
                                 label = { Text(option.label) },
                             )
                         }

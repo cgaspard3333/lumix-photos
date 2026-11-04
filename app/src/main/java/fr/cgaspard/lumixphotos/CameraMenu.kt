@@ -181,3 +181,36 @@ object CameraMenu {
         return (0 until list.length).map { list.item(it) as Element }
     }
 }
+
+/**
+ * Position de la molette. L'appareil ne l'indique pas directement : on la reconnaît aux réglages
+ * qu'il rend disponibles (relevés sur un FZ1000 ; C1 et C2 apparaissent sous leur mode d'origine).
+ */
+enum class ShootingMode(val short: String, val label: String) {
+    INTELLIGENT_AUTO("iA", "Auto intelligent"),
+    PROGRAM("P", "Programme"),
+    APERTURE("A", "Priorité ouverture"),
+    SHUTTER("S", "Priorité vitesse"),
+    MANUAL("M", "Manuel"),
+    SCENE("SCN", "Scène"),
+    CREATIVE("Créatif", "Commande créative"),
+    VIDEO("Vidéo", "Vidéo créative");
+
+    val apertureEditable get() = this == APERTURE || this == MANUAL
+    val shutterEditable get() = this == SHUTTER || this == MANUAL
+
+    companion object {
+        fun detect(enabled: Set<String>): ShootingMode? = when {
+            enabled.isEmpty() -> null
+            "menu_item_id_f_and_ss" in enabled -> MANUAL
+            "menu_item_id_shutter_speed" in enabled -> SHUTTER
+            "menu_item_id_aperture" in enabled -> APERTURE
+            "menu_item_id_program_shift" in enabled -> PROGRAM
+            "menu_item_id_scn_gid" in enabled -> SCENE
+            "menu_item_id_crtv_ctrl" in enabled -> CREATIVE
+            // Seule position sans réglages de format photo
+            "menu_item_id_asprat" !in enabled -> VIDEO
+            else -> INTELLIGENT_AUTO
+        }
+    }
+}

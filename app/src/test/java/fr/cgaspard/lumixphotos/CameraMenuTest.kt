@@ -56,4 +56,17 @@ class CameraMenuTest {
         val manual = CameraMenu.lensLimits("ok,1536/256,761/256,3584/256,16384/256,0,on,400,25,on,128/1024,on")!!
         assertEquals(shutter, CameraMenu.shutterSetting(manual).options.map { it.label })
     }
+
+    @Test
+    fun `position de la molette reconnue sur les relevés du FZ1000`() {
+        val expected = mapOf(
+            "iA" to ShootingMode.INTELLIGENT_AUTO, "P" to ShootingMode.PROGRAM, "A" to ShootingMode.APERTURE,
+            "S" to ShootingMode.SHUTTER, "M" to ShootingMode.MANUAL, "SCN" to ShootingMode.SCENE,
+            "CRTV" to ShootingMode.CREATIVE, "VIDEO" to ShootingMode.VIDEO,
+        )
+        for ((file, mode) in expected) {
+            val enabled = CameraMenu.enabledItems(javaClass.getResource("/dial/$file.xml")!!.readText())
+            assertEquals(file, mode, ShootingMode.detect(enabled))
+        }
+    }
 }

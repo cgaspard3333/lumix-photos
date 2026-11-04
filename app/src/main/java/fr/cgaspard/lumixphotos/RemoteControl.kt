@@ -32,8 +32,10 @@ data class RemoteState(
     val values: Map<String, Pair<String, String?>> = emptyMap(),
     /** Valeurs utilisables dans le mode actuel de l'appareil (molette, mode photo/vidéo…). */
     val enabled: Set<String> = emptySet(),
-    /** Valeurs dont curmenu indique la disponibilité ; les autres (ouverture, vitesse) sont toujours proposées. */
+    /** Valeurs dont curmenu indique la disponibilité ; ouverture et vitesse dépendent de [mode]. */
     val knownItems: Set<String> = emptySet(),
+    /** Position de la molette, déduite des réglages disponibles. */
+    val mode: ShootingMode? = null,
     val recording: Boolean = false,
     val recordSeconds: Int = 0,
     val photosLeft: Int? = null,
@@ -49,6 +51,13 @@ data class RemoteState(
     }
 
     fun isEnabled(option: SettingOption) = enabled.isEmpty() || option.itemId !in knownItems || option.itemId in enabled
+
+    /** Le réglage peut-il être changé depuis l'appli dans la position actuelle de la molette ? */
+    fun isEditable(setting: CameraSetting): Boolean = when (setting.id) {
+        "aperture" -> mode?.apertureEditable ?: true
+        "shutter" -> mode?.shutterEditable ?: true
+        else -> setting.options.any { isEnabled(it) }
+    }
 
     fun current(setting: CameraSetting): SettingOption? {
         if (setting.type in APEX_TYPES) {
@@ -221,23 +230,41 @@ class RemoteController(
                     )
                 }
                 Regex("<batt>(\\d+)/(\\d+)</batt>").find(reply)?.destructured?.let { (l, m) -> onBattery(Battery(l.toInt(), m.toInt())) }
+                // La molette ne fait l'objet d'aucune notification : on relit les réglages disponibles
+                if (!_state.value.recording && _state.value.settings.isNotEmpty()) checkModeChange(c)
                 if (streaming && SystemClock.elapsedRealtime() - lastFrameAt > 2_500) runCatching { startStream() }
             }
         }
     }
 
     private suspend fun loadSettings(c: LumixClient) {
-        val settings = menu ?: buildList {
-            val lens = http.withPermit { c.info("lens") }
-            CameraMenu.lensLimits(lens)?.let {
-                add(CameraMenu.apertureSetting(it))
-                add(CameraMenu.shutterSetting(it))
-            }
-            addAll(CameraMenu.parse(http.withPermit { c.info("allmenu") }))
-        }.also { menu = it }
+        val settings = lensSettings(c) + (menu ?: CameraMenu.parse(http.withPermit { c.info("allmenu") }).also { menu = it })
         val known = settings.filterNot { it.id == "aperture" || it.id == "shutter" }.flatMap { s -> s.options.map { it.itemId } }.toSet()
         _state.update { it.copy(settings = settings, knownItems = known) }
         refreshValues(c, settings.map { it.type }.distinct())
+    }
+
+    /** Ouverture et vitesse : leurs bornes changent avec le mode (vidéo, M…) et le zoom. */
+    private suspend fun lensSettings(c: LumixClient): List<CameraSetting> {
+        val limits = CameraMenu.lensLimits(http.withPermit { c.info("lens") }) ?: return emptyList()
+        return listOf(CameraMenu.apertureSetting(limits), CameraMenu.shutterSetting(limits))
+    }
+
+    /** Si la molette a tourné : nouvelles bornes, nouvelles valeurs, réglages (in)disponibles mis à jour. */
+    private suspend fun checkModeChange(c: LumixClient) {
+        val enabled = runCatching { CameraMenu.enabledItems(http.withPermit { c.info("curmenu") }) }.getOrNull() ?: return
+        if (enabled == _state.value.enabled) return
+        val mode = ShootingMode.detect(enabled)
+        val lens = runCatching { lensSettings(c) }.getOrDefault(emptyList())
+        _state.update { s ->
+            s.copy(
+                enabled = enabled,
+                mode = mode,
+                settings = if (lens.isEmpty()) s.settings else lens + s.settings.filterNot { it.id == "aperture" || it.id == "shutter" },
+            )
+        }
+        // L'appareil change lui-même certaines valeurs selon le mode (ISO auto en iA…)
+        refreshValues(c, _state.value.settings.map { it.type }.distinct())
     }
 
     /** Relit la disponibilité des valeurs et la valeur actuelle des réglages [types]. */
@@ -248,7 +275,13 @@ class RemoteController(
             val reply = runCatching { http.withPermit { c.getSetting(type) } }.getOrNull() ?: continue
             runCatching { CameraMenu.currentValue(reply, type) }.getOrNull()?.let { values[type] = it }
         }
-        _state.update { s -> s.copy(values = s.values + values, enabled = enabled ?: s.enabled) }
+        _state.update { s ->
+            s.copy(
+                values = s.values + values,
+                enabled = enabled ?: s.enabled,
+                mode = enabled?.let { ShootingMode.detect(it) } ?: s.mode,
+            )
+        }
     }
 
     fun capture() = command(shooting = true) { it.capture() }
