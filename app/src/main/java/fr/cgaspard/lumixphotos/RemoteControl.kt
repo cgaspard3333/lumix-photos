@@ -262,7 +262,7 @@ class RemoteController(
         pollJob?.cancel()
         pollJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
-                delay(if (_state.value.recording) 1_000 else 3_000)
+                delay(1_000)
                 val c = client() ?: break
                 val reply = runCatching { http.withPermit { c.keepAlive() } }.getOrNull() ?: continue
                 fun tag(name: String) = Regex("<$name>([^<]*)</$name>").find(reply)?.groupValues?.get(1)
@@ -276,7 +276,14 @@ class RemoteController(
                 }
                 Regex("<batt>(\\d+)/(\\d+)</batt>").find(reply)?.destructured?.let { (l, m) -> onBattery(Battery(l.toInt(), m.toInt())) }
                 // La molette ne fait l'objet d'aucune notification : on relit les réglages disponibles
-                if (!_state.value.recording && _state.value.settings.isNotEmpty()) checkModeChange(c)
+                // Valeurs changées sur l'appareil lui-même : il ne les signale pas, on les relit. Chaque
+                // seconde pour celles affichées, la molette toutes les 3 s, le reste toutes les 12 s ;
+                // pas pendant un zoom au pincement, qui a besoin de l'appareil pour réagir vite.
+                if (!_state.value.recording && _state.value.settings.isNotEmpty() && zoomJob?.isActive != true) {
+                    pollCount++
+                    val modeChanged = pollCount % 3 == 0 && checkModeChange(c)
+                    if (!modeChanged) refreshValues(c, if (pollCount % 12 == 0) allTypes() else LIVE_TYPES, readMenu = false)
+                }
                 if (streaming && SystemClock.elapsedRealtime() - lastFrameAt > 2_500) runCatching { startStream() }
             }
         }
@@ -297,10 +304,17 @@ class RemoteController(
         return listOf(CameraMenu.apertureSetting(limits), CameraMenu.shutterSetting(limits))
     }
 
-    /** Si la molette a tourné : nouvelles bornes, nouvelles valeurs, réglages (in)disponibles mis à jour. */
-    private suspend fun checkModeChange(c: LumixClient) {
-        val enabled = runCatching { CameraMenu.enabledItems(http.withPermit { c.info("curmenu") }) }.getOrNull() ?: return
-        if (enabled == _state.value.enabled) return
+    private var pollCount = 0
+
+    private fun allTypes() = _state.value.settings.map { it.type }.distinct()
+
+    /**
+     * Si la molette a tourné : nouvelles bornes, nouvelles valeurs, réglages (in)disponibles mis à
+     * jour. Renvoie true si c'est le cas (les valeurs viennent alors d'être toutes relues).
+     */
+    private suspend fun checkModeChange(c: LumixClient): Boolean {
+        val enabled = runCatching { CameraMenu.enabledItems(http.withPermit { c.info("curmenu") }) }.getOrNull() ?: return false
+        if (enabled == _state.value.enabled) return false
         val mode = ShootingMode.detect(enabled)
         val lens = runCatching { lensSettings(c) }.getOrDefault(emptyList())
         _state.update { s ->
@@ -311,14 +325,16 @@ class RemoteController(
             )
         }
         // L'appareil change lui-même certaines valeurs selon le mode (ISO auto en iA…)
-        refreshValues(c, _state.value.settings.map { it.type }.distinct())
+        refreshValues(c, allTypes())
+        return true
     }
 
     /** Relit la disponibilité des valeurs et la valeur actuelle des réglages [types]. */
-    private suspend fun refreshValues(c: LumixClient, types: List<String>) {
-        val enabled = runCatching { CameraMenu.enabledItems(http.withPermit { c.info("curmenu") }) }.getOrNull()
+    private suspend fun refreshValues(c: LumixClient, types: List<String>, readMenu: Boolean = true) {
+        val enabled = if (readMenu) runCatching { CameraMenu.enabledItems(http.withPermit { c.info("curmenu") }) }.getOrNull() else null
         val values = HashMap<String, Pair<String, String?>>()
         for (type in types) {
+            if (readMenu.not() && SystemClock.elapsedRealtime() - (setAt[type] ?: 0) < 2_000) continue
             val reply = runCatching { http.withPermit { c.getSetting(type) } }.getOrNull() ?: continue
             runCatching { CameraMenu.currentValue(reply, type) }.getOrNull()?.let { values[type] = it }
         }
@@ -455,7 +471,11 @@ class RemoteController(
         command { it.touchFocus((x * 1000).toInt().coerceIn(0, 1000), (y * 1000).toInt().coerceIn(0, 1000)) }
     }
 
+    /** Heure du dernier changement fait depuis l'appli, par type : la relecture périodique l'épargne un moment. */
+    private val setAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     fun set(setting: CameraSetting, option: SettingOption) {
+        setAt[setting.type] = SystemClock.elapsedRealtime()
         // Affichage immédiat, confirmé ensuite par l'appareil
         _state.update { it.copy(values = it.values + (setting.type to (option.value to option.value2))) }
         scope.launch(Dispatchers.IO) {
@@ -499,6 +519,8 @@ class RemoteController(
     private companion object {
         const val PREFERRED_PORT = 49199
         const val FOCAL_FROM_END = 78
+        /** Réglages relus à chaque tour : ceux du rappel d'exposition et des raccourcis courants. */
+        val LIVE_TYPES = listOf("focal", "shtrspeed", "exposure", "iso", "whitebalance", "lightmetering", "flash")
         /** Position de l'orientation dans l'en-tête des images (avant les zones AF, donc fixe). */
         const val ORIENTATION_OFFSET = 42
         /** Temps (s) pendant lequel l'objectif continue après l'ordre d'arrêt, retard de la visée compris. */
