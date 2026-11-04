@@ -1,5 +1,7 @@
 package fr.cgaspard.lumixphotos
 
+import kotlin.math.abs
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.layout.heightIn
@@ -50,6 +52,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -147,6 +150,9 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
     val remote = vm.remote
     val r by remote.state.collectAsStateWithLifecycle()
     var sheet by remember { mutableStateOf<Sheet?>(null) }
+    // Molette virtuelle en cours (appui long + glisser sur un réglage)
+    var scrub by remember { mutableStateOf<Scrub?>(null) }
+    val scrubber = Scrubber({ r }, remote) { scrub = it }
     val snackbar = remember { SnackbarHostState() }
     // Bref flash blanc à chaque photo, comme un obturateur
     val flash = remember { Animatable(0f) }
@@ -200,7 +206,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                     // infos et exposition à gauche, jauge de zoom à droite près des boutons de zoom
                     val side = spare / 2
                     Row(Modifier.fillMaxSize()) {
-                        InfoColumn(r, s, vm, open = { sheet = it }, modifier = Modifier.width(side).fillMaxHeight())
+                        InfoColumn(r, s, vm, scrubber, open = { sheet = it }, modifier = Modifier.width(side).fillMaxHeight())
                         Box(Modifier.fillMaxHeight().aspectRatio(ratio)) {
                             LiveView(remote, r, flash.value, Modifier.fillMaxSize(), showGauge = false)
                             Box(
@@ -208,7 +214,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                                     .align(Alignment.BottomCenter)
                                     .fillMaxWidth()
                                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f)))),
-                            ) { QuickSettings(r) { sheet = it } }
+                            ) { QuickSettings(r, scrubber) { sheet = it } }
                         }
                         val focal by remote.focal.collectAsStateWithLifecycle()
                         val target by remote.zoomTarget.collectAsStateWithLifecycle()
@@ -242,7 +248,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f)))),
                             ) {
                                 ExposureReadout(r)
-                                QuickSettings(r) { sheet = it }
+                                QuickSettings(r, scrubber) { sheet = it }
                             }
                         }
                         Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(controlsWidth).fillMaxHeight())
@@ -252,10 +258,11 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                         StatusBar(r, s, onBack = vm::exitRemote)
                         LiveView(remote, r, flash.value, Modifier.weight(1f).fillMaxWidth())
                         ExposureReadout(r)
-                        QuickSettings(r) { sheet = it }
+                        QuickSettings(r, scrubber) { sheet = it }
                         Controls(r, remote, shoot, vertical = false, modifier = Modifier.fillMaxWidth().height(132.dp))
                     }
                 }
+                scrub?.let { ScrubWheel(it, Modifier.align(Alignment.Center)) }
                 SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
             }
             sheet?.let { current -> SettingsSheet(r, remote, current, onChange = { sheet = it }, onDismiss = { sheet = null }) }
@@ -374,7 +381,7 @@ private fun ZoomGauge(focal: Int, target: Int?, range: IntRange, compact: Boolea
  * empilées. Toucher une valeur d'exposition ouvre son réglage quand il est modifiable.
  */
 @Composable
-private fun InfoColumn(r: RemoteState, s: UiState, vm: CameraSession, open: (Sheet) -> Unit, modifier: Modifier) {
+private fun InfoColumn(r: RemoteState, s: UiState, vm: CameraSession, scrubber: Scrubber, open: (Sheet) -> Unit, modifier: Modifier) {
     Column(
         modifier.verticalScroll(rememberScrollState()).padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -404,11 +411,92 @@ private fun InfoColumn(r: RemoteState, s: UiState, vm: CameraSession, open: (She
                 color = Color.White.copy(alpha = if (editable) 1f else 0.6f),
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
+                    .then(if (editable) scrubber.modifier(setting) else Modifier)
                     .clickable(enabled = editable) { open(Sheet.One(id)) }
                     .padding(horizontal = 6.dp, vertical = 4.dp),
             )
         }
         IconButton(onClick = { open(Sheet.All) }, enabled = r.settings.isNotEmpty()) { Icon(Icons.Default.Tune, "Tous les réglages") }
+    }
+}
+
+/** Réglage en cours de modification à la molette virtuelle, pour le bandeau affiché sur la visée. */
+private data class Scrub(val setting: CameraSetting, val options: List<SettingOption>, val index: Int)
+
+/**
+ * Molette virtuelle : appui long sur un réglage puis glisser à gauche / droite pour faire défiler ses
+ * valeurs (un cran tous les [SCRUB_STEP]). Un simple toucher reste géré par le composant (ouvre la liste).
+ */
+private fun Modifier.scrubbable(
+    setting: CameraSetting,
+    r: () -> RemoteState,
+    remote: RemoteController,
+    onScrub: (Scrub?) -> Unit,
+): Modifier = pointerInput(setting.id) {
+    var options = emptyList<SettingOption>()
+    var start = 0
+    var index = 0
+    var accumulated = 0f
+    detectDragGesturesAfterLongPress(
+        onDragStart = {
+            val state = r()
+            options = setting.options.filter { state.isEnabled(it) }
+            start = options.indexOf(state.current(setting)).coerceAtLeast(0)
+            index = start
+            accumulated = 0f
+            if (options.isNotEmpty()) onScrub(Scrub(setting, options, index))
+        },
+        onDrag = { change, amount ->
+            change.consume()
+            if (options.isEmpty()) return@detectDragGesturesAfterLongPress
+            accumulated += amount.x
+            val next = (start + (accumulated / SCRUB_STEP.toPx()).toInt()).coerceIn(0, options.lastIndex)
+            if (next != index) {
+                index = next
+                remote.scrub(setting, options[index])
+                onScrub(Scrub(setting, options, index))
+            }
+        },
+        onDragEnd = {
+            if (options.isNotEmpty() && index != start) remote.scrubEnd(setting, options[index])
+            onScrub(null)
+        },
+        onDragCancel = { onScrub(null) },
+    )
+}
+
+private val SCRUB_STEP = 22.dp
+
+/** Regroupe ce dont la molette virtuelle a besoin, pour l'attacher à n'importe quel réglage affiché. */
+private class Scrubber(val state: () -> RemoteState, val remote: RemoteController, val onScrub: (Scrub?) -> Unit) {
+    fun modifier(setting: CameraSetting): Modifier = Modifier.scrubbable(setting, state, remote, onScrub)
+}
+
+/** Bandeau « molette » sur la visée : valeur choisie au centre, voisines de part et d'autre. */
+@Composable
+private fun ScrubWheel(scrub: Scrub, modifier: Modifier) {
+    Column(
+        modifier
+            .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(scrub.setting.title, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.7f))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            for (offset in -2..2) {
+                val option = scrub.options.getOrNull(scrub.index + offset)
+                Text(
+                    option?.label ?: "",
+                    style = if (offset == 0) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (offset == 0) FontWeight.Bold else FontWeight.Normal,
+                    color = if (offset == 0) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.55f - 0.15f * abs(offset)),
+                    maxLines = 1,
+                    modifier = Modifier.widthIn(min = 40.dp),
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+        Text("◀  glisser  ▶", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
     }
 }
 
@@ -656,7 +744,7 @@ private fun Modifier.pointerInputTap(onTap: (Offset) -> Unit) = this.then(
 )
 
 @Composable
-private fun QuickSettings(r: RemoteState, open: (Sheet) -> Unit) {
+private fun QuickSettings(r: RemoteState, scrubber: Scrubber, open: (Sheet) -> Unit) {
     val byId = r.settings.associateBy { it.id }
     Row(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
@@ -668,6 +756,7 @@ private fun QuickSettings(r: RemoteState, open: (Sheet) -> Unit) {
             AssistChip(
                 onClick = { open(Sheet.One(id)) },
                 enabled = r.isEditable(setting),
+                modifier = if (r.isEditable(setting)) scrubber.modifier(setting) else Modifier,
                 label = {
                     Column(Modifier.padding(vertical = 4.dp)) {
                         Text(setting.title, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))

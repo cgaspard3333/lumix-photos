@@ -481,6 +481,37 @@ class RemoteController(
     /** Heure du dernier changement fait depuis l'appli, par type : la relecture périodique l'épargne un moment. */
     private val setAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /** Valeur visée par la molette virtuelle ; seule la dernière est envoyée si l'appareil est plus lent que le doigt. */
+    private val scrubTarget = MutableStateFlow<Pair<CameraSetting, SettingOption>?>(null)
+    private var scrubJob: Job? = null
+
+    /** Molette virtuelle : applique la valeur tout de suite, sans relecture complète à chaque cran. */
+    fun scrub(setting: CameraSetting, option: SettingOption) {
+        setAt[setting.type] = SystemClock.elapsedRealtime()
+        _state.update { it.copy(values = it.values + (setting.type to (option.value to option.value2))) }
+        scrubTarget.value = setting to option
+        if (scrubJob?.isActive == true) return
+        scrubJob = scope.launch(Dispatchers.IO) {
+            val c = client() ?: return@launch
+            var sent: Pair<CameraSetting, SettingOption>? = null
+            while (isActive) {
+                val target = scrubTarget.value
+                if (target == null || target == sent) break
+                runCatching { http.withPermit { c.setSetting(target.first.type, target.second.value, target.second.value2) } }
+                sent = target
+            }
+        }
+    }
+
+    /** Fin du geste : la dernière valeur est appliquée puis vérifiée comme un réglage normal. */
+    fun scrubEnd(setting: CameraSetting, option: SettingOption) {
+        scope.launch {
+            scrubJob?.join()
+            scrubTarget.value = null
+            set(setting, option)
+        }
+    }
+
     fun set(setting: CameraSetting, option: SettingOption) {
         setAt[setting.type] = SystemClock.elapsedRealtime()
         // Affichage immédiat, confirmé ensuite par l'appareil
