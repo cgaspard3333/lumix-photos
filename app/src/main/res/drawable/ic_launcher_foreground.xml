@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Appareil photo, dans la zone sûre (66 dp centrés) des icônes adaptatives -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M34,42h8l4,-6h16l4,6h8a4,4 0,0 1,4 4v24a4,4 0,0 1,-4 4h-40a4,4 0,0 1,-4 -4v-24a4,4 0,0 1,4 -4z
+            M43,57a11,11 0,1 0,22 0a11,11 0,1 0,-22 0z
+            M48,57a6,6 0,1 0,12 0a6,6 0,1 0,-12 0z
+            M69,47a2.5,2.5 0,1 0,5 0a2.5,2.5 0,1 0,-5 0z" />
+</vector>

@@ -49,7 +49,7 @@ enum class DisplayFilter(val label: String) {
     ALL("Tout"),
     PHOTOS("Photos"),
     VIDEOS("Vidéos"),
-    NOT_DOWNLOADED("Pas encore téléchargés"),
+    NOT_DOWNLOADED("À télécharger"),
 }
 
 /** Ce que l'utilisateur s'apprête à télécharger, pour la fenêtre de confirmation. */
@@ -401,12 +401,13 @@ class CameraSession(private val app: Application) {
         }
     }
 
-    suspend fun thumbnail(item: CameraItem): ImageBitmap? = loadImage(item.thumbnailUrl, thumbnails, timeoutMs = 5_000)
+    // Vignettes 4:3 de l'appareil : les photos 3:2 y sont entourées de bandes noires, qu'on retire
+    suspend fun thumbnail(item: CameraItem): ImageBitmap? = loadImage(item.thumbnailUrl, thumbnails, timeoutMs = 5_000, trim = true)
 
     /** Aperçu 1620×1080 pour l'affichage plein écran (~1 Mo, moins d'une seconde). */
     suspend fun preview(item: CameraItem): ImageBitmap? = loadImage(item.previewUrl, previews, timeoutMs = 15_000)
 
-    private suspend fun loadImage(url: String?, cache: LruCache<String, ImageBitmap>, timeoutMs: Int): ImageBitmap? {
+    private suspend fun loadImage(url: String?, cache: LruCache<String, ImageBitmap>, timeoutMs: Int, trim: Boolean = false): ImageBitmap? {
         if (url == null) return null
         cache.get(url)?.let { return it }
         if (url in failedImages) return null
@@ -419,7 +420,7 @@ class CameraSession(private val app: Application) {
                 runCatching {
                     val response = c.openStream(url, timeoutMs = timeoutMs, reuseConnection = true)
                     val bitmap = response.stream.use { BitmapFactory.decodeStream(it) }!!
-                    bitmap.rotated(response.meta.rotation).asImageBitmap()
+                    (if (trim) bitmap.trimBlackBars() else bitmap).rotated(response.meta.rotation).asImageBitmap()
                 }.onSuccess { cache.put(url, it) }
                     .onFailure { failedImages += url }
                     .getOrNull()
@@ -626,6 +627,21 @@ class CameraSession(private val app: Application) {
     }
 
     fun messageShown() = _state.update { it.copy(message = null) }
+
+    /** Retire les bandes noires uniformes sur les bords (au plus 15 % de chaque côté). */
+    private fun Bitmap.trimBlackBars(): Bitmap {
+        fun dark(pixel: Int) = maxOf(pixel shr 16 and 0xFF, pixel shr 8 and 0xFF, pixel and 0xFF) < 16
+        fun rowDark(y: Int) = (0 until width step 4).all { dark(getPixel(it, y)) }
+        fun columnDark(x: Int) = (0 until height step 4).all { dark(getPixel(x, it)) }
+        val maxY = height * 15 / 100
+        val maxX = width * 15 / 100
+        val top = (0 until maxY).firstOrNull { !rowDark(it) } ?: 0
+        val bottom = (0 until maxY).firstOrNull { !rowDark(height - 1 - it) } ?: 0
+        val left = (0 until maxX).firstOrNull { !columnDark(it) } ?: 0
+        val right = (0 until maxX).firstOrNull { !columnDark(width - 1 - it) } ?: 0
+        if (top + bottom + left + right == 0) return this
+        return Bitmap.createBitmap(this, left, top, width - left - right, height - top - bottom)
+    }
 
     private fun Bitmap.rotated(exifOrientation: Int): Bitmap {
         val degrees = when (exifOrientation) {
