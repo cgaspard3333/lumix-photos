@@ -43,11 +43,10 @@ internal fun ChooserScreen(s: UiState, vm: CameraSession, message: String? = nul
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             Text("Connecté à l'appareil", style = MaterialTheme.typography.headlineSmall)
-            Text(
-                listOfNotNull(s.wifiSsid.ifEmpty { null }, s.battery?.let { "batterie $it" }).joinToString(" · "),
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (s.battery?.low == true) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(s.wifiSsid, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                s.battery?.let { BatteryIcon(it, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.padding(start = 10.dp)) }
+            }
             message?.let { Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
             val remote = @Composable { mod: Modifier ->
                 Choice(Icons.Outlined.PhotoCamera, "Prise de vue", "Visée en direct, déclencheur, zoom et réglages", mod, vm::enterRemote)

@@ -1,5 +1,7 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
@@ -84,6 +86,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -95,6 +98,10 @@ import kotlin.math.ln
 import androidx.compose.animation.core.animateFloatAsState
 
 /** Réglages proposés en accès direct sous la visée, dans cet ordre quand l'appareil les propose. */
+/** Hauteurs approximatives des bandeaux posés sur la visée en paysage. */
+private val TOP_OVERLAY = 56.dp
+private val BOTTOM_OVERLAY = 104.dp
+
 private const val EXPOSURE = "menu_item_id_exposure2"
 private const val ISO = "menu_item_id_sensitivity"
 private const val WB = "menu_item_id_whitebalance"
@@ -171,15 +178,33 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
         Surface(color = Color.Black, contentColor = Color.White, modifier = Modifier.fillMaxSize()) {
             BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()) {
                 val landscape = maxWidth > maxHeight
+                val shortScreen = maxHeight < 500.dp
                 if (landscape) {
+                    // Visée sur toute la hauteur ; infos et raccourcis par-dessus, sur un dégradé sombre
                     Row(Modifier.fillMaxSize()) {
-                        Column(Modifier.weight(1f).fillMaxHeight()) {
-                            StatusBar(r, s, onBack = vm::exitRemote)
-                            LiveView(remote, r, flash.value, Modifier.weight(1f).fillMaxWidth())
-                            ExposureReadout(r)
-                            QuickSettings(r) { sheet = it }
+                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                            LiveView(
+                                remote, r, flash.value, Modifier.fillMaxSize(),
+                                overlayInsets = PaddingValues(top = TOP_OVERLAY, bottom = BOTTOM_OVERLAY),
+                                compactGauge = shortScreen,
+                            )
+                            Box(
+                                Modifier
+                                    .align(Alignment.TopCenter)
+                                    .fillMaxWidth()
+                                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))),
+                            ) { StatusBar(r, s, onBack = vm::exitRemote) }
+                            Column(
+                                Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .fillMaxWidth()
+                                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f)))),
+                            ) {
+                                ExposureReadout(r)
+                                QuickSettings(r) { sheet = it }
+                            }
                         }
-                        Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(132.dp).fillMaxHeight())
+                        Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(if (shortScreen) 104.dp else 132.dp).fillMaxHeight())
                     }
                 } else {
                     Column(Modifier.fillMaxSize()) {
@@ -199,34 +224,41 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
 
 @Composable
 private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(Icons.Outlined.PhotoLibrary, "Photos et vidéos de la carte") }
-        if (r.recording) {
-            Box(Modifier.size(10.dp).background(Color.Red, CircleShape))
-            Spacer(Modifier.width(6.dp))
-            Text(formatClock(r.recordSeconds), fontWeight = FontWeight.SemiBold, color = Color.Red)
-        } else {
-            Text("Prise de vue", style = MaterialTheme.typography.titleMedium)
+    // Sur un écran étroit (téléphone en portrait), tout tient sur une ligne : titre masqué,
+    // badge réduit au sigle du mode, autonomie en abrégé
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compact = maxWidth < 600.dp
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.Outlined.PhotoLibrary, "Photos et vidéos de la carte") }
+            if (r.recording) {
+                Box(Modifier.size(10.dp).background(Color.Red, CircleShape))
+                Spacer(Modifier.width(6.dp))
+                Text(formatClock(r.recordSeconds), fontWeight = FontWeight.SemiBold, color = Color.Red)
+            } else if (!compact) {
+                Text("Prise de vue", style = MaterialTheme.typography.titleMedium)
+            }
+            r.mode?.let { ModeBadge(it, withLabel = !compact) }
+            Spacer(Modifier.weight(1f))
+            val parts = buildList {
+                r.photosLeft?.let { add(if (compact) "$it ph." else "$it photos") }
+                r.videoSecondsLeft?.let { add(if (compact) formatClock(it) else "${formatClock(it)} de vidéo") }
+            }
+            Text(
+                parts.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = Color.White.copy(alpha = 0.75f),
+                modifier = Modifier.padding(start = 8.dp, end = 8.dp),
+            )
+            s.battery?.let { BatteryIcon(it, Color.White.copy(alpha = 0.85f), Modifier.padding(end = 12.dp)) }
         }
-        r.mode?.let { ModeBadge(it) }
-        Spacer(Modifier.weight(1f))
-        val parts = buildList {
-            r.photosLeft?.let { add("$it photos") }
-            r.videoSecondsLeft?.let { add("${formatClock(it)} de vidéo") }
-            s.battery?.let { add("batterie $it") }
-        }
-        Text(
-            parts.joinToString(" · "),
-            style = MaterialTheme.typography.bodySmall,
-            color = if (s.battery?.low == true) MaterialTheme.colorScheme.error else Color.White.copy(alpha = 0.75f),
-            modifier = Modifier.padding(end = 12.dp),
-        )
     }
 }
 
 /** Position de la molette, ex. « M  Manuel ». */
 @Composable
-private fun ModeBadge(mode: ShootingMode) {
+private fun ModeBadge(mode: ShootingMode, withLabel: Boolean = true) {
     Row(
         Modifier
             .padding(start = 12.dp)
@@ -235,8 +267,10 @@ private fun ModeBadge(mode: ShootingMode) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(mode.short, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
-        Spacer(Modifier.width(6.dp))
-        Text(mode.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        if (withLabel) {
+            Spacer(Modifier.width(6.dp))
+            Text(mode.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
     }
 }
 
@@ -245,51 +279,54 @@ private fun ModeBadge(mode: ShootingMode) {
  * zoom), focale en mm équivalent 24×36 et facteur de grossissement.
  */
 @Composable
-private fun ZoomGauge(focal: Int, target: Int?, range: IntRange, modifier: Modifier) {
+private fun ZoomGauge(focal: Int, target: Int?, range: IntRange, compact: Boolean, modifier: Modifier) {
     fun position(f: Int) = (ln(f.toFloat() / range.first) / ln(range.last.toFloat() / range.first)).coerceIn(0f, 1f)
     val animated by animateFloatAsState(position(focal), label = "zoom")
     val factor = focal.toFloat() / range.first
+    val label = "$focal mm  ·  ×" + if (factor < 9.95f) "%.1f".format(factor).replace('.', ',') else factor.roundToInt().toString()
+    val bar = @Composable { mod: Modifier ->
+        Box(mod.height(if (compact) 4.dp else 6.dp).background(Color.White.copy(alpha = 0.25f), CircleShape)) {
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(animated.coerceAtLeast(0.02f))
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
+            // Repère de la focale visée pendant un pincement
+            target?.let { t ->
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    Box(
+                        Modifier
+                            .offset(x = maxWidth * position(t) - 2.dp, y = (-4).dp)
+                            .size(width = 4.dp, height = if (compact) 12.dp else 14.dp)
+                            .background(Color.White, RoundedCornerShape(2.dp)),
+                    )
+                }
+            }
+        }
+    }
+    val background = Modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(if (compact) 8.dp else 12.dp))
+    if (compact) {
+        // Une seule ligne, sans les bornes : la visée d'un téléphone est petite
+        Row(
+            modifier.width(220.dp).then(background).padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = Color.White, maxLines = 1)
+            Spacer(Modifier.width(8.dp))
+            bar(Modifier.weight(1f))
+        }
+        return
+    }
     Column(
-        modifier
-            .width(260.dp)
-            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier.width(260.dp).then(background).padding(horizontal = 12.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            "$focal mm  ·  ×" + if (factor < 9.95f) "%.1f".format(factor).replace('.', ',') else factor.roundToInt().toString(),
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White,
-        )
+        Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = Color.White)
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("${range.first}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
-            Box(
-                Modifier
-                    .weight(1f)
-                    .padding(horizontal = 8.dp)
-                    .height(6.dp)
-                    .background(Color.White.copy(alpha = 0.25f), CircleShape),
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(animated.coerceAtLeast(0.02f))
-                        .background(MaterialTheme.colorScheme.primary, CircleShape),
-                )
-                // Repère de la focale visée pendant un pincement
-                target?.let { t ->
-                    BoxWithConstraints(Modifier.fillMaxSize()) {
-                        Box(
-                            Modifier
-                                .offset(x = maxWidth * position(t) - 2.dp, y = (-4).dp)
-                                .size(width = 4.dp, height = 14.dp)
-                                .background(Color.White, RoundedCornerShape(2.dp)),
-                        )
-                    }
-                }
-            }
+            bar(Modifier.weight(1f).padding(horizontal = 8.dp))
             Text("${range.last}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
         }
     }
@@ -319,7 +356,16 @@ private fun ExposureReadout(r: RemoteState) {
 
 /** Visée : toucher l'image fait la mise au point à cet endroit. */
 @Composable
-private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, modifier: Modifier) {
+private fun LiveView(
+    remote: RemoteController,
+    r: RemoteState,
+    flash: Float,
+    modifier: Modifier,
+    /** Place prise par ce qui est affiché par-dessus la visée (paysage), pour ne pas y cacher la jauge. */
+    overlayInsets: PaddingValues = PaddingValues(),
+    /** Jauge de zoom réduite (écran peu haut, ex. téléphone en paysage). */
+    compactGauge: Boolean = false,
+) {
     val frame by remote.frame.collectAsStateWithLifecycle()
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     val focusAlpha = remember { Animatable(0f) }
@@ -375,7 +421,15 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
             val target by remote.zoomTarget.collectAsStateWithLifecycle()
             val range = r.zoomRange
             if (focal != null && range != null) {
-                ZoomGauge(focal!!, target, range, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+                ZoomGauge(
+                    focal!!, target, range,
+                    // Visée étroite (téléphone) : jauge plus petite pour ne pas masquer l'image
+                    compact = compactGauge || with(density) { w.toDp() } < 500.dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(overlayInsets)
+                        .padding(if (with(density) { w.toDp() } < 500.dp) 6.dp else 12.dp),
+                )
             }
             // Pendant une vidéo pilotée en Wi-Fi, le FZ1000 bloque ses propres commandes
             if (r.recording) {
@@ -386,6 +440,7 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
                     textAlign = TextAlign.Center,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
+                        .padding(overlayInsets)
                         .padding(12.dp)
                         .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
                         .padding(horizontal = 12.dp, vertical = 6.dp),

@@ -180,15 +180,18 @@ private fun Subtitle(s: UiState) {
     val parts = buildList {
         add(s.loadingCard ?: "${s.items.size} fichiers")
         if (s.metaLoaded < s.items.size) add("dates ${s.metaLoaded}/${s.items.size}")
-        s.battery?.let { add("batterie $it") }
     }
-    Text(
-        parts.joinToString(" · "),
-        style = MaterialTheme.typography.bodySmall,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        color = if (s.battery?.low == true) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            parts.joinToString(" · "),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        s.battery?.let { BatteryIcon(it, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.padding(start = 8.dp)) }
+    }
 }
 
 /** Filtres d'affichage, toujours visibles sous la barre du haut. */
