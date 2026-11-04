@@ -1,5 +1,9 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import android.os.Build
+import android.graphics.RuntimeShader
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -62,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -202,7 +207,14 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
                     }
                 },
         ) {
-            Image(image, contentDescription = "Visée", contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+            // Image de 640 px agrandie jusqu'à 4× sur tablette : filtrage soigné, puis renforcement de netteté
+            Image(
+                image,
+                contentDescription = "Visée",
+                contentScale = ContentScale.FillBounds,
+                filterQuality = FilterQuality.High,
+                modifier = Modifier.fillMaxSize().sharpened(scale = w / image.width),
+            )
             focusPoint?.let { p ->
                 val half = with(density) { 36.dp.toPx() }
                 Box(
@@ -217,6 +229,36 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
         }
     }
 }
+
+/**
+ * Masque flou (unsharp mask) calculé par la carte graphique (Android 13+) : compare chaque point
+ * à ses voisins situés à un pixel *source* de distance, pour accentuer les détails de l'image
+ * d'origine sans amplifier l'escalier dû à l'agrandissement.
+ */
+@Composable
+private fun Modifier.sharpened(scale: Float): Modifier {
+    if (Build.VERSION.SDK_INT < 33 || scale < 1.2f) return this
+    // Compilé une seule fois ; seul l'écart entre points suit la taille d'affichage
+    val shader = remember { RuntimeShader(SHARPEN_SHADER) }
+    val effect = remember(scale) {
+        shader.setFloatUniform("texel", scale)
+        shader.setFloatUniform("amount", 0.4f)
+        android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
+    }
+    return graphicsLayer { renderEffect = effect }
+}
+
+private const val SHARPEN_SHADER = """
+    uniform shader content;
+    uniform float texel;
+    uniform float amount;
+    half4 main(float2 p) {
+        half4 c = content.eval(p);
+        half4 blur = (content.eval(p + float2(texel, 0)) + content.eval(p - float2(texel, 0)) +
+                      content.eval(p + float2(0, texel)) + content.eval(p - float2(0, texel))) * 0.25;
+        return half4(clamp(c.rgb + (c.rgb - blur.rgb) * amount, 0.0, 1.0), c.a);
+    }
+"""
 
 private fun Modifier.pointerInputTap(onTap: (Offset) -> Unit) = this.then(
     Modifier.pointerInput(Unit) { detectTapGestures(onTap = onTap) }

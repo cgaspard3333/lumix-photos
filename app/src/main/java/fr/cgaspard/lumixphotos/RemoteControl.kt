@@ -106,6 +106,9 @@ class RemoteController(
                 http.withPermit { c.recMode() }
                 // Le temps que l'objectif sorte et que l'appareil bascule
                 delay(1_500)
+                // Meilleure définition de visée (640×432 au lieu de 320×216) ; prise en compte au
+                // démarrage de la visée seulement, d'où ce réglage avant startStream
+                runCatching { http.withPermit { c.setSetting("liveviewsize", "vga") } }
                 startStream()
                 _state.update { it.copy(active = true, starting = false) }
                 startPolling()
