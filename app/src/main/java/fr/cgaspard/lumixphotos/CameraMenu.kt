@@ -120,6 +120,15 @@ object CameraMenu {
     /** Bornes (Av min, Av max, Tv min, Tv max) en 1/256 d'IL, ex. « ok,1536/256,761/256,3584/256,-1536/256,… ». */
     data class LensLimits(val minAv: Int, val maxAv: Int, val minTv: Int, val maxTv: Int)
 
+    /** Focales extrêmes en mm, ex. « …,on,400,25,on,… » → 25..400. */
+    fun focalRange(lens: String): IntRange? {
+        val parts = lens.split(',')
+        if (parts.firstOrNull() != "ok" || parts.size < 9) return null
+        val max = parts[7].toIntOrNull() ?: return null
+        val min = parts[8].toIntOrNull() ?: return null
+        return if (min in 1 until max) min..max else null
+    }
+
     fun lensLimits(lens: String): LensLimits? {
         val parts = lens.split(',')
         if (parts.firstOrNull() != "ok" || parts.size < 5) return null

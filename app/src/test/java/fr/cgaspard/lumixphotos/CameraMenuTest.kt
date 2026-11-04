@@ -69,4 +69,10 @@ class CameraMenuTest {
             assertEquals(file, mode, ShootingMode.detect(enabled))
         }
     }
+
+    @Test
+    fun `plage focale photo et vidéo`() {
+        assertEquals(25..400, CameraMenu.focalRange("ok,1536/256,761/256,3584/256,-1536/256,0,on,400,25,on,128/1024,on"))
+        assertEquals(37..592, CameraMenu.focalRange("ok,1771/256,761/256,3584/256,1195/256,0,on,592,37,on,128/1024,on"))
+    }
 }

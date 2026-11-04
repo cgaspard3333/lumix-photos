@@ -72,6 +72,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -79,9 +80,32 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import kotlin.math.ln
+import androidx.compose.animation.core.animateFloatAsState
 
 /** Réglages proposés en accès direct sous la visée, dans cet ordre quand l'appareil les propose. */
-private val QUICK_SETTINGS = listOf("aperture", "shutter", "menu_item_id_exposure2", "menu_item_id_sensitivity", "menu_item_id_whitebalance", "menu_item_id_afmode")
+private const val EXPOSURE = "menu_item_id_exposure2"
+private const val ISO = "menu_item_id_sensitivity"
+private const val WB = "menu_item_id_whitebalance"
+private const val AF = "menu_item_id_afmode"
+private const val METERING = "menu_item_id_lightmet"
+private const val FLASH = "menu_item_id_flash"
+
+/**
+ * Raccourcis sous la visée, adaptés à la position de la molette : ce qu'on règle le plus souvent
+ * dans ce mode. Seuls ceux que l'appareil permet de changer sont affichés.
+ */
+private fun quickSettings(mode: ShootingMode?): List<String> = when (mode) {
+    ShootingMode.INTELLIGENT_AUTO -> listOf(EXPOSURE, "menu_item_id_ph_sty", "menu_item_id_asprat", "menu_item_id_quality", "menu_item_id_v_quality")
+    ShootingMode.PROGRAM -> listOf(EXPOSURE, ISO, WB, AF, METERING, FLASH)
+    ShootingMode.APERTURE -> listOf("aperture", EXPOSURE, ISO, WB, AF, METERING)
+    ShootingMode.SHUTTER -> listOf("shutter", EXPOSURE, ISO, WB, AF, METERING)
+    ShootingMode.MANUAL -> listOf("aperture", "shutter", ISO, WB, AF, METERING)
+    ShootingMode.SCENE -> listOf("menu_item_id_scn_gid", EXPOSURE, WB, AF, FLASH)
+    ShootingMode.CREATIVE -> listOf("menu_item_id_crtv_ctrl", EXPOSURE, METERING, "menu_item_id_asprat")
+    ShootingMode.VIDEO -> listOf("menu_item_id_v_quality", EXPOSURE, ISO, WB, AF, "menu_item_id_4kphoto")
+    null -> listOf("aperture", "shutter", EXPOSURE, ISO, WB, AF)
+}
 
 private sealed interface Sheet {
     data object All : Sheet
@@ -127,6 +151,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                         Column(Modifier.weight(1f).fillMaxHeight()) {
                             StatusBar(r, s, onBack = vm::exitRemote)
                             LiveView(remote, r, flash.value, Modifier.weight(1f).fillMaxWidth())
+                            ExposureReadout(r)
                             QuickSettings(r) { sheet = it }
                         }
                         Controls(r, remote, shoot, vertical = true, modifier = Modifier.width(132.dp).fillMaxHeight())
@@ -135,6 +160,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
                     Column(Modifier.fillMaxSize()) {
                         StatusBar(r, s, onBack = vm::exitRemote)
                         LiveView(remote, r, flash.value, Modifier.weight(1f).fillMaxWidth())
+                        ExposureReadout(r)
                         QuickSettings(r) { sheet = it }
                         Controls(r, remote, shoot, vertical = false, modifier = Modifier.fillMaxWidth().height(132.dp))
                     }
@@ -187,6 +213,72 @@ private fun ModeBadge(mode: ShootingMode) {
         Spacer(Modifier.width(6.dp))
         Text(mode.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
     }
+}
+
+/**
+ * Jauge de zoom : position entre grand-angle et télé (échelle logarithmique, comme le ressenti du
+ * zoom), focale en mm équivalent 24×36 et facteur de grossissement.
+ */
+@Composable
+private fun ZoomGauge(focal: Int, range: IntRange, modifier: Modifier) {
+    val fraction = (ln(focal.toFloat() / range.first) / ln(range.last.toFloat() / range.first)).coerceIn(0f, 1f)
+    val animated by animateFloatAsState(fraction, label = "zoom")
+    val factor = focal.toFloat() / range.first
+    Column(
+        modifier
+            .width(260.dp)
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "$focal mm  ·  ×" + if (factor < 9.95f) "%.1f".format(factor).replace('.', ',') else factor.roundToInt().toString(),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${range.first}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
+            Box(
+                Modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp)
+                    .height(6.dp)
+                    .background(Color.White.copy(alpha = 0.25f), CircleShape),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(animated.coerceAtLeast(0.02f))
+                        .background(MaterialTheme.colorScheme.primary, CircleShape),
+                )
+            }
+            Text("${range.last}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
+        }
+    }
+}
+
+/** Rappel d'exposition, comme sur l'écran de l'appareil : aussi les valeurs qu'il choisit lui-même. */
+@Composable
+private fun ExposureReadout(r: RemoteState) {
+    val byId = r.settings.associateBy { it.id }
+    val parts = buildList {
+        byId["aperture"]?.let { add(r.currentLabel(it)) }
+        byId["shutter"]?.let { add(r.currentLabel(it)) }
+        byId[ISO]?.let { add("ISO " + r.currentLabel(it)) }
+        // Correction d'exposition affichée seulement quand elle est active
+        byId[EXPOSURE]?.takeIf { r.isEditable(it) }?.let { e -> r.currentLabel(e).takeIf { it != "0" && it != "—" }?.let { add("$it IL") } }
+    }.filter { "—" !in it }
+    if (parts.isEmpty()) return
+    Text(
+        parts.joinToString("   "),
+        style = MaterialTheme.typography.labelLarge,
+        fontWeight = FontWeight.SemiBold,
+        color = Color.White.copy(alpha = 0.85f),
+        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        textAlign = TextAlign.Center,
+    )
 }
 
 /** Visée : toucher l'image fait la mise au point à cet endroit. */
@@ -242,6 +334,11 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
                         .border(2.dp, Color(0xFFFFD54F), RoundedCornerShape(6.dp)),
                 )
             }
+            val focal by remote.focal.collectAsStateWithLifecycle()
+            val range = r.zoomRange
+            if (focal != null && range != null) {
+                ZoomGauge(focal!!, range, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+            }
             if (flash > 0f) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = flash)))
         }
     }
@@ -292,8 +389,8 @@ private fun QuickSettings(r: RemoteState, open: (Sheet) -> Unit) {
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        for (id in QUICK_SETTINGS) {
-            val setting = byId[id] ?: continue
+        for (id in quickSettings(r.mode)) {
+            val setting = byId[id]?.takeIf { r.isEditable(it) } ?: continue
             // Grisé quand la molette ne permet pas de le changer (la valeur choisie par l'appareil reste affichée)
             AssistChip(
                 onClick = { open(Sheet.One(id)) },

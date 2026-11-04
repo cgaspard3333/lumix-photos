@@ -36,6 +36,8 @@ data class RemoteState(
     val knownItems: Set<String> = emptySet(),
     /** Position de la molette, déduite des réglages disponibles. */
     val mode: ShootingMode? = null,
+    /** Focales extrêmes en mm (équivalent 24×36) dans le mode actuel. */
+    val zoomRange: IntRange? = null,
     val recording: Boolean = false,
     val recordSeconds: Int = 0,
     val photosLeft: Int? = null,
@@ -96,6 +98,10 @@ class RemoteController(
     /** Dernière image de la visée, à part de [state] pour ne pas redessiner tout l'écran 30 fois par seconde. */
     private val _frame = MutableStateFlow<ImageBitmap?>(null)
     val frame: StateFlow<ImageBitmap?> = _frame.asStateFlow()
+
+    /** Focale actuelle en mm (équivalent 24×36), lue dans le flux de visée. */
+    private val _focal = MutableStateFlow<Int?>(null)
+    val focal: StateFlow<Int?> = _focal.asStateFlow()
 
     private var socket: DatagramSocket? = null
     private var streamJob: Job? = null
@@ -158,6 +164,7 @@ class RemoteController(
         }
         _state.value = RemoteState()
         _frame.value = null
+        _focal.value = null
     }
 
     /** Visée suspendue quand l'appli passe en arrière-plan, reprise au retour. */
@@ -202,10 +209,26 @@ class RemoteController(
                 break
             }
             val soi = (0 until packet.length - 1).firstOrNull { buf[it] == 0xFF.toByte() && buf[it + 1] == 0xD8.toByte() } ?: continue
+            readFocal(buf, soi)
             val bitmap = BitmapFactory.decodeByteArray(buf, soi, packet.length - soi) ?: continue
             _frame.value = bitmap.asImageBitmap()
             lastFrameAt = SystemClock.elapsedRealtime()
         }
+    }
+
+    /**
+     * Focale actuelle (mm, équivalent 24×36) : dans l'en-tête Panasonic qui précède chaque image,
+     * toujours à 78 octets de sa fin (l'en-tête s'allonge quand des zones de mise au point s'y
+     * ajoutent). Relevé sur un FZ1000 : 25 → 400 mm en photo, 37 → 592 mm en vidéo.
+     */
+    private fun readFocal(buf: ByteArray, headerLength: Int) {
+        if (headerLength < FOCAL_FROM_END) return
+        val i = headerLength - FOCAL_FROM_END
+        val focal = ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+        val range = _state.value.zoomRange
+        // Garde-fou si un autre modèle range ses données autrement
+        if (range != null && focal !in (range.first * 8 / 10)..(range.last * 12 / 10)) return
+        if (focal != _focal.value) _focal.value = focal
     }
 
     /**
@@ -246,7 +269,9 @@ class RemoteController(
 
     /** Ouverture et vitesse : leurs bornes changent avec le mode (vidéo, M…) et le zoom. */
     private suspend fun lensSettings(c: LumixClient): List<CameraSetting> {
-        val limits = CameraMenu.lensLimits(http.withPermit { c.info("lens") }) ?: return emptyList()
+        val lens = http.withPermit { c.info("lens") }
+        CameraMenu.focalRange(lens)?.let { range -> _state.update { it.copy(zoomRange = range) } }
+        val limits = CameraMenu.lensLimits(lens) ?: return emptyList()
         return listOf(CameraMenu.apertureSetting(limits), CameraMenu.shutterSetting(limits))
     }
 
@@ -334,5 +359,6 @@ class RemoteController(
 
     private companion object {
         const val PREFERRED_PORT = 49199
+        const val FOCAL_FROM_END = 78
     }
 }
