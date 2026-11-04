@@ -1,0 +1,302 @@
+package fr.cgaspard.lumixphotos
+
+import android.graphics.BitmapFactory
+import android.os.SystemClock
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import kotlin.math.abs
+
+data class RemoteState(
+    val active: Boolean = false,
+    /** Passage en mode prise de vue en cours. */
+    val starting: Boolean = false,
+    val settings: List<CameraSetting> = emptyList(),
+    /** Valeur actuelle par type de réglage (valeur, seconde valeur éventuelle). */
+    val values: Map<String, Pair<String, String?>> = emptyMap(),
+    /** Valeurs utilisables dans le mode actuel de l'appareil (molette, mode photo/vidéo…). */
+    val enabled: Set<String> = emptySet(),
+    /** Valeurs dont curmenu indique la disponibilité ; les autres (ouverture, vitesse) sont toujours proposées. */
+    val knownItems: Set<String> = emptySet(),
+    val recording: Boolean = false,
+    val recordSeconds: Int = 0,
+    val photosLeft: Int? = null,
+    val videoSecondsLeft: Int? = null,
+    /** Un déclenchement est en cours : on évite d'empiler les commandes. */
+    val shooting: Boolean = false,
+    val message: String? = null,
+) {
+    fun isSelected(setting: CameraSetting, option: SettingOption): Boolean {
+        val (value, value2) = values[setting.type] ?: return false
+        if (setting.type in APEX_TYPES) return current(setting) == option
+        return option.value == value && (option.value2 == null || value2 == null || option.value2 == value2)
+    }
+
+    fun isEnabled(option: SettingOption) = enabled.isEmpty() || option.itemId !in knownItems || option.itemId in enabled
+
+    fun current(setting: CameraSetting): SettingOption? {
+        if (setting.type in APEX_TYPES) {
+            // Ouverture et vitesse : l'appareil donne une valeur exacte (ex. 761/256 pour f/2,8),
+            // la liste propose les tiers d'IL : on retient le plus proche
+            val apex = values[setting.type]?.first?.substringBefore('/')?.toIntOrNull() ?: return null
+            return setting.options.minByOrNull { abs((it.value.substringBefore('/').toIntOrNull() ?: 0) - apex) }
+        }
+        return setting.options.firstOrNull { isSelected(setting, it) }
+    }
+
+    /** Libellé de la valeur actuelle, ou la valeur brute si elle n'est pas dans la liste du menu. */
+    fun currentLabel(setting: CameraSetting): String =
+        current(setting)?.label ?: values[setting.type]?.first?.replace('_', ' ') ?: "—"
+
+    private companion object {
+        val APEX_TYPES = setOf("focal", "shtrspeed")
+    }
+}
+
+/**
+ * Prise de vue à distance : visée en direct, déclenchement, vidéo, zoom et réglages.
+ *
+ * Partage avec le reste de l'appli le [http] à une seule place : l'appareil ne supporte pas
+ * deux requêtes à la fois. La visée arrive à part, en UDP (~30 images/s en VGA).
+ */
+class RemoteController(
+    private val scope: CoroutineScope,
+    private val http: Semaphore,
+    private val client: () -> LumixClient?,
+    private val onBattery: (Battery) -> Unit,
+) {
+    private val _state = MutableStateFlow(RemoteState())
+    val state: StateFlow<RemoteState> = _state.asStateFlow()
+
+    /** Dernière image de la visée, à part de [state] pour ne pas redessiner tout l'écran 30 fois par seconde. */
+    private val _frame = MutableStateFlow<ImageBitmap?>(null)
+    val frame: StateFlow<ImageBitmap?> = _frame.asStateFlow()
+
+    private var socket: DatagramSocket? = null
+    private var streamJob: Job? = null
+    private var pollJob: Job? = null
+    private var startJob: Job? = null
+    @Volatile private var lastFrameAt = 0L
+    @Volatile private var streaming = false
+    /** Le menu complet ne change pas pendant une session : lu une seule fois. */
+    private var menu: List<CameraSetting>? = null
+
+    fun start() {
+        if (_state.value.active || _state.value.starting) return
+        _state.value = RemoteState(starting = true)
+        startJob = scope.launch(Dispatchers.IO) {
+            val c = client() ?: return@launch
+            try {
+                http.withPermit { c.recMode() }
+                // Le temps que l'objectif sorte et que l'appareil bascule
+                delay(1_500)
+                startStream()
+                _state.update { it.copy(active = true, starting = false) }
+                startPolling()
+            } catch (e: Exception) {
+                _state.value = RemoteState(message = "Impossible de passer en prise de vue : ${e.message}")
+                return@launch
+            }
+            // Sans les réglages, la visée et le déclencheur restent utilisables
+            try {
+                loadSettings(c)
+            } catch (e: Exception) {
+                _state.update { it.copy(message = "Réglages de l'appareil illisibles : ${e.message}") }
+            }
+        }
+    }
+
+    /** Arrête la visée et repasse l'appareil en lecture (pour lister et télécharger les fichiers). */
+    suspend fun stop() {
+        startJob?.cancel()
+        pollJob?.cancel()
+        streaming = false
+        streamJob?.cancel()
+        socket?.close()
+        socket = null
+        val c = client()
+        if (c != null) {
+            withContext(Dispatchers.IO) {
+                runCatching { http.withPermit { c.stopStream() } }
+                if (_state.value.recording) runCatching { http.withPermit { c.stopVideo() } }
+                // L'appareil peut ignorer « playmode » tant qu'il range l'objectif : on vérifie et on insiste
+                repeat(10) {
+                    runCatching { http.withPermit { c.playMode() } }
+                    delay(800)
+                    val state = runCatching { http.withPermit { c.keepAlive() } }.getOrDefault("")
+                    if ("<cammode>play</cammode>" in state) return@withContext
+                }
+            }
+        }
+        _state.value = RemoteState()
+        _frame.value = null
+    }
+
+    /** Visée suspendue quand l'appli passe en arrière-plan, reprise au retour. */
+    fun pauseStream() = stopStream()
+
+    fun resumeStream() {
+        if (_state.value.active && !streaming) scope.launch(Dispatchers.IO) { runCatching { startStream() } }
+    }
+
+    private suspend fun startStream() {
+        val c = client() ?: return
+        val s = socket ?: openSocket().also { socket = it }
+        http.withPermit { c.startStream(s.localPort) }
+        streaming = true
+        lastFrameAt = SystemClock.elapsedRealtime()
+        if (streamJob?.isActive != true) streamJob = scope.launch(Dispatchers.IO) { receive(s) }
+    }
+
+    private fun stopStream() {
+        streaming = false
+        streamJob?.cancel()
+        socket?.close()
+        socket = null
+        val c = client() ?: return
+        scope.launch(Dispatchers.IO) { http.withPermit { c.stopStream() } }
+    }
+
+    private fun openSocket(): DatagramSocket =
+        // Port habituel des applis Lumix, sinon un port libre
+        runCatching { DatagramSocket(PREFERRED_PORT) }.getOrElse { DatagramSocket(0) }.apply { soTimeout = 1_000 }
+
+    /** Chaque paquet contient un en-tête Panasonic suivi d'une image JPEG complète. */
+    private fun receive(s: DatagramSocket) {
+        val buf = ByteArray(65_536)
+        val packet = DatagramPacket(buf, buf.size)
+        while (streaming && !s.isClosed) {
+            try {
+                s.receive(packet)
+            } catch (_: SocketTimeoutException) {
+                continue
+            } catch (_: SocketException) {
+                break
+            }
+            val soi = (0 until packet.length - 1).firstOrNull { buf[it] == 0xFF.toByte() && buf[it + 1] == 0xD8.toByte() } ?: continue
+            val bitmap = BitmapFactory.decodeByteArray(buf, soi, packet.length - soi) ?: continue
+            _frame.value = bitmap.asImageBitmap()
+            lastFrameAt = SystemClock.elapsedRealtime()
+        }
+    }
+
+    /**
+     * État de l'appareil (enregistrement, autonomie, batterie), toutes les secondes pendant une
+     * vidéo et toutes les 3 s sinon. Sert aussi de maintien de session, et relance la visée si
+     * l'appareil a cessé d'envoyer des images.
+     */
+    private fun startPolling() {
+        pollJob?.cancel()
+        pollJob = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(if (_state.value.recording) 1_000 else 3_000)
+                val c = client() ?: break
+                val reply = runCatching { http.withPermit { c.keepAlive() } }.getOrNull() ?: continue
+                fun tag(name: String) = Regex("<$name>([^<]*)</$name>").find(reply)?.groupValues?.get(1)
+                _state.update {
+                    it.copy(
+                        recording = tag("rec") == "on",
+                        recordSeconds = tag("progress_time")?.toIntOrNull() ?: 0,
+                        photosLeft = tag("remaincapacity")?.toIntOrNull(),
+                        videoSecondsLeft = tag("video_remaincapacity")?.toIntOrNull(),
+                    )
+                }
+                Regex("<batt>(\\d+)/(\\d+)</batt>").find(reply)?.destructured?.let { (l, m) -> onBattery(Battery(l.toInt(), m.toInt())) }
+                if (streaming && SystemClock.elapsedRealtime() - lastFrameAt > 2_500) runCatching { startStream() }
+            }
+        }
+    }
+
+    private suspend fun loadSettings(c: LumixClient) {
+        val settings = menu ?: buildList {
+            val lens = http.withPermit { c.info("lens") }
+            CameraMenu.lensLimits(lens)?.let {
+                add(CameraMenu.apertureSetting(it))
+                add(CameraMenu.shutterSetting(it))
+            }
+            addAll(CameraMenu.parse(http.withPermit { c.info("allmenu") }))
+        }.also { menu = it }
+        val known = settings.filterNot { it.id == "aperture" || it.id == "shutter" }.flatMap { s -> s.options.map { it.itemId } }.toSet()
+        _state.update { it.copy(settings = settings, knownItems = known) }
+        refreshValues(c, settings.map { it.type }.distinct())
+    }
+
+    /** Relit la disponibilité des valeurs et la valeur actuelle des réglages [types]. */
+    private suspend fun refreshValues(c: LumixClient, types: List<String>) {
+        val enabled = runCatching { CameraMenu.enabledItems(http.withPermit { c.info("curmenu") }) }.getOrNull()
+        val values = HashMap<String, Pair<String, String?>>()
+        for (type in types) {
+            val reply = runCatching { http.withPermit { c.getSetting(type) } }.getOrNull() ?: continue
+            runCatching { CameraMenu.currentValue(reply, type) }.getOrNull()?.let { values[type] = it }
+        }
+        _state.update { s -> s.copy(values = s.values + values, enabled = enabled ?: s.enabled) }
+    }
+
+    fun capture() = command(shooting = true) { it.capture() }
+
+    fun toggleVideo() {
+        val recording = _state.value.recording
+        command(shooting = true) { if (recording) it.stopVideo() else it.startVideo() }
+        _state.update { it.copy(recording = !recording, recordSeconds = 0) }
+    }
+
+    fun zoom(tele: Boolean, fast: Boolean) = command {
+        it.zoom((if (tele) "tele" else "wide") + if (fast) "-fast" else "-normal")
+    }
+
+    fun zoomStop() = command { it.zoomStop() }
+
+    /** [x] et [y] entre 0 et 1 sur l'image de la visée. */
+    fun focusAt(x: Float, y: Float) = command { it.touchFocus((x * 1000).toInt().coerceIn(0, 1000), (y * 1000).toInt().coerceIn(0, 1000)) }
+
+    fun set(setting: CameraSetting, option: SettingOption) {
+        // Affichage immédiat, confirmé ensuite par l'appareil
+        _state.update { it.copy(values = it.values + (setting.type to (option.value to option.value2))) }
+        scope.launch(Dispatchers.IO) {
+            val c = client() ?: return@launch
+            try {
+                http.withPermit { c.setSetting(setting.type, option.value, option.value2) }
+            } catch (e: Exception) {
+                _state.update { it.copy(message = "${setting.title} : ${e.message}") }
+            }
+            // Un réglage peut en rendre d'autres disponibles ou non (format → taille d'image…)
+            refreshValues(c, _state.value.settings.map { it.type }.distinct())
+        }
+    }
+
+    fun messageShown() = _state.update { it.copy(message = null) }
+
+    private fun command(shooting: Boolean = false, block: (LumixClient) -> Unit) {
+        val c = client() ?: return
+        if (shooting) _state.update { it.copy(shooting = true) }
+        scope.launch(Dispatchers.IO) {
+            try {
+                http.withPermit { block(c) }
+            } catch (e: Exception) {
+                _state.update { it.copy(message = e.message) }
+            } finally {
+                if (shooting) _state.update { it.copy(shooting = false) }
+            }
+        }
+    }
+
+    private companion object {
+        const val PREFERRED_PORT = 49199
+    }
+}

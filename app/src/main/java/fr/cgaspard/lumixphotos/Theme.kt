@@ -45,10 +45,12 @@ private val LumixShapes = Shapes(
     extraLarge = RoundedCornerShape(32.dp),
 )
 
-/** Couleurs du fond d'écran (Material You) quand Android le permet, sinon la palette Lumix. */
+/**
+ * Couleurs du fond d'écran (Material You) quand Android le permet, sinon la palette Lumix.
+ * [dark] force le thème sombre (télécommande, sur fond noir comme un viseur).
+ */
 @Composable
-fun LumixTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
+fun LumixTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     val context = LocalContext.current
     val colors = when {
         Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)

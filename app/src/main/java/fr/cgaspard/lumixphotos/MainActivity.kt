@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
@@ -85,6 +86,13 @@ private fun App(vm: CameraSession) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshDownloaded() }
     BackHandler(enabled = s.selectionMode && viewerIndex == null) { vm.exitSelection() }
 
+    // Prise de vue à distance : l'écran de télécommande remplace la galerie
+    val remote by vm.remote.state.collectAsStateWithLifecycle()
+    if (connected && (remote.active || remote.starting)) {
+        RemoteScreen(vm, s)
+        return
+    }
+
     val selecting = connected && s.selectionMode
     // En mode sélection, la barre du haut prend une teinte d'accent, comme dans Google Photos
     val barColor by animateColorAsState(
@@ -143,6 +151,14 @@ private fun App(vm: CameraSession) {
         Viewer(visible, start, s, vm, onClose = { viewerIndex = null })
     }
     s.plan?.let { DownloadDialog(it, s.battery, vm) }
+    // Échec du passage en prise de vue : l'écran de télécommande ne s'est pas ouvert pour l'afficher
+    remote.message?.let { msg ->
+        AlertDialog(
+            onDismissRequest = vm.remote::messageShown,
+            confirmButton = { TextButton(onClick = vm.remote::messageShown) { Text("OK") } },
+            text = { Text(msg) },
+        )
+    }
     s.message?.let { msg ->
         AlertDialog(
             onDismissRequest = vm::messageShown,
@@ -211,6 +227,12 @@ private fun EmptyState(text: String) {
 
 @Composable
 private fun TopActions(s: UiState, vm: CameraSession) {
+    if (!s.selectionMode) {
+        // Pendant un téléchargement, l'appareil doit rester en lecture
+        IconButton(onClick = vm::enterRemote, enabled = s.download == null) {
+            Icon(Icons.Default.PhotoCamera, "Prise de vue à distance")
+        }
+    }
     // En mode sélection, on laisse la place au nombre de fichiers sélectionnés
     if (s.viewMode == ViewMode.GRID && !s.selectionMode) {
         IconButton(onClick = { vm.setColumns(s.columns + 1) }, enabled = s.columns < CameraSession.MAX_COLUMNS) {

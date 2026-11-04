@@ -172,6 +172,9 @@ class CameraSession(private val app: Application) {
     private val cameraHttp = Semaphore(1)
     private val thumbnails = LruCache<String, ImageBitmap>(400)
     private val previews = LruCache<String, ImageBitmap>(6)
+
+    /** Prise de vue à distance : partage la même file de requêtes que le reste de l'appli. */
+    val remote = RemoteController(scope, cameraHttp, { client }) { battery -> _state.update { it.copy(battery = battery) } }
     // Certains fichiers font bloquer le serveur de l'appareil : on ne les redemande jamais
     private val failedImages = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -245,6 +248,9 @@ class CameraSession(private val app: Application) {
         keepAliveJob?.cancel()
         metaJob?.cancel()
         downloadJob?.cancel()
+        // Remet l'appareil en lecture si on était en prise de vue, avant de lâcher la connexion
+        val c = client
+        if (c != null && remote.state.value.let { it.active || it.starting }) scope.launch { remote.stop() }
         client = null
         rejoinJob?.cancel()
         releaseCameraWifi()
@@ -333,8 +339,9 @@ class CameraSession(private val app: Application) {
             while (isActive) {
                 delay(10_000)
                 val c = client ?: break
-                // Pendant un téléchargement, le trafic suffit à garder la session ouverte
-                if (downloadJob?.isActive == true) continue
+                // Pendant un téléchargement, le trafic suffit à garder la session ouverte ;
+                // en prise de vue, la télécommande interroge déjà l'appareil
+                if (downloadJob?.isActive == true || remote.state.value.let { it.active || it.starting }) continue
                 try {
                     val cameraState = cameraHttp.withPermit { c.keepAlive() }
                     parseBattery(cameraState)?.let { b -> _state.update { it.copy(battery = b) } }
@@ -617,6 +624,36 @@ class CameraSession(private val app: Application) {
                 // Avec la connexion automatique, le callback réseau se charge de la reliaison
                 if (cameraWifi == null && rejoinJob?.isActive != true) CameraFinder.bindToWifi(app)
             }
+        }
+    }
+
+    /** Passe en prise de vue à distance (impossible pendant un téléchargement : l'appareil doit rester en lecture). */
+    fun enterRemote() {
+        if (client == null || downloadJob?.isActive == true) return
+        metaJob?.cancel()
+        remote.start()
+    }
+
+    /** Revient à la galerie ; les photos et vidéos prises entre-temps apparaissent. */
+    fun exitRemote() {
+        scope.launch {
+            remote.stop()
+            // Juste après le retour en lecture, l'appareil peut encore refuser la liste : on réessaie un peu
+            val c = client ?: return@launch
+            var listed: List<CameraItem>? = null
+            for (attempt in 1..8) {
+                listed = runCatching { withContext(Dispatchers.IO) { cameraHttp.withPermit { c.listItems() } } }.getOrNull()
+                if (listed != null) break
+                delay(1_500)
+            }
+            val items = listed ?: return@launch lostConnection(IOException("l'appareil ne répond plus après la prise de vue"))
+            _state.update { s ->
+                val ids = items.mapTo(HashSet()) { it.id }
+                s.copy(items = items, selected = s.selected.filterTo(mutableSetOf()) { it in ids })
+            }
+            startKeepAlive()
+            startMetaLoader()
+            refreshDownloaded()
         }
     }
 

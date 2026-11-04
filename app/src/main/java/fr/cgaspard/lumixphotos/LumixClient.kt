@@ -48,6 +48,16 @@ data class FileMeta(
 
 class CameraResponse(val stream: InputStream, val meta: FileMeta)
 
+/** L'appareil a répondu autre chose que « ok » (err_reject, err_busy…). */
+class CameraRefusedException(val code: String) : IOException(
+    when (code) {
+        "err_reject" -> "L'appareil refuse cette commande dans son mode actuel"
+        "err_busy" -> "L'appareil est occupé"
+        "err_param" -> "Valeur non acceptée par l'appareil"
+        else -> "L'appareil a répondu « $code »"
+    }
+)
+
 /**
  * Client pour les Lumix Wi-Fi (FZ1000, GH4, GX8, G80…) en mode
  * « Prise de vue à distance et affichage ».
@@ -163,6 +173,8 @@ class LumixClient(val host: String) {
             conn.setRequestProperty("SOAPACTION", "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\"")
             conn.outputStream.use { it.write(body.toByteArray()) }
             if (conn.responseCode != 200) {
+                val error = runCatching { conn.errorStream?.use { it.readBytes().decodeToString() } }.getOrNull()
+                Log.w(TAG, "Browse HTTP ${conn.responseCode} : ${error?.take(300)}")
                 throw IOException("Browse : HTTP ${conn.responseCode}")
             }
             val envelope = conn.inputStream.use { it.readBytes().decodeToString() }
@@ -222,6 +234,49 @@ class LumixClient(val host: String) {
         return FileMeta.fromHeaders(conn::getHeaderField)
     }
 
+    // --- Prise de vue à distance ---
+
+    /** Mode prise de vue (visée, déclenchement) ou lecture (liste et téléchargement des fichiers). */
+    fun recMode() = checked("mode=camcmd&value=recmode")
+    fun playMode() = checked("mode=camcmd&value=playmode")
+
+    /** Visée en direct : l'appareil envoie des images JPEG en UDP vers ce port du téléphone. */
+    fun startStream(port: Int) = checked("mode=startstream&value=$port")
+    fun stopStream() = runCatching { camCommand("mode=stopstream") }
+
+    fun capture() {
+        checked("mode=camcmd&value=capture")
+        // Relâche le déclencheur (sinon l'appareil reste « à mi-course »)
+        camCommand("mode=camcmd&value=capture_cancel")
+    }
+
+    fun startVideo() = checked("mode=camcmd&value=video_recstart")
+    fun stopVideo() = checked("mode=camcmd&value=video_recstop")
+
+    /** [command] : tele-normal, tele-fast, wide-normal ou wide-fast. */
+    fun zoom(command: String) = checked("mode=camcmd&value=$command")
+    fun zoomStop() = runCatching { camCommand("mode=camcmd&value=zoomstop") }
+
+    /** Mise au point sur un point de l'image, coordonnées de 0 à 1000. */
+    fun touchFocus(x: Int, y: Int) {
+        checked("mode=camctrl&type=touch&value=$x/$y&value2=on")
+        camCommand("mode=camctrl&type=touch&value=$x/$y&value2=off")
+    }
+
+    fun info(type: String): String = camCommand("mode=getinfo&type=$type")
+    fun getSetting(type: String): String = camCommand("mode=getsetting&type=$type")
+
+    fun setSetting(type: String, value: String, value2: String? = null) =
+        checked("mode=setsetting&type=$type&value=${value.urlEncodeValue()}" + (value2?.let { "&value2=${it.urlEncodeValue()}" } ?: ""))
+
+    /** Exécute une commande et lève une erreur lisible si l'appareil la refuse. */
+    private fun checked(query: String): String {
+        val reply = camCommand(query)
+        val result = Regex("<result>([^<]*)</result>").find(reply)?.groupValues?.get(1)
+        if (result != null && result != "ok") throw CameraRefusedException(result)
+        return reply
+    }
+
     private fun camCommand(query: String): String {
         val conn = open("$camUrl?$query", timeoutMs = 8_000)
         try {
@@ -249,6 +304,9 @@ class LumixClient(val host: String) {
         private const val PAGE_SIZE = 50
 
         private fun String.urlEncode(): String = java.net.URLEncoder.encode(this, "UTF-8")
+
+        // Les valeurs comme « 1/3 » ou « 761/256 » passent telles quelles : l'appareil n'attend pas « %2F »
+        private fun String.urlEncodeValue(): String = urlEncode().replace("%2F", "/").replace("%3A", ":")
 
         /** Contenu texte (déséchappé) du premier élément `tag`, quel que soit son préfixe. */
         private fun extractTag(xml: String, tag: String): String? {
