@@ -1,5 +1,9 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import android.os.Build
@@ -220,9 +224,9 @@ private fun ModeBadge(mode: ShootingMode) {
  * zoom), focale en mm équivalent 24×36 et facteur de grossissement.
  */
 @Composable
-private fun ZoomGauge(focal: Int, range: IntRange, modifier: Modifier) {
-    val fraction = (ln(focal.toFloat() / range.first) / ln(range.last.toFloat() / range.first)).coerceIn(0f, 1f)
-    val animated by animateFloatAsState(fraction, label = "zoom")
+private fun ZoomGauge(focal: Int, target: Int?, range: IntRange, modifier: Modifier) {
+    fun position(f: Int) = (ln(f.toFloat() / range.first) / ln(range.last.toFloat() / range.first)).coerceIn(0f, 1f)
+    val animated by animateFloatAsState(position(focal), label = "zoom")
     val factor = focal.toFloat() / range.first
     Column(
         modifier
@@ -253,6 +257,17 @@ private fun ZoomGauge(focal: Int, range: IntRange, modifier: Modifier) {
                         .fillMaxWidth(animated.coerceAtLeast(0.02f))
                         .background(MaterialTheme.colorScheme.primary, CircleShape),
                 )
+                // Repère de la focale visée pendant un pincement
+                target?.let { t ->
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
+                        Box(
+                            Modifier
+                                .offset(x = maxWidth * position(t) - 2.dp, y = (-4).dp)
+                                .size(width = 4.dp, height = 14.dp)
+                                .background(Color.White, RoundedCornerShape(2.dp)),
+                        )
+                    }
+                }
             }
             Text("${range.last}", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
         }
@@ -307,6 +322,7 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
             Modifier
                 .size(with(density) { w.toDp() }, with(density) { h.toDp() })
                 .then(if (r.recording) Modifier.border(3.dp, Color.Red) else Modifier)
+                .pinchToZoom(remote)
                 .pointerInputTap { offset ->
                     focusPoint = offset
                     remote.focusAt(offset.x / w, offset.y / h)
@@ -335,9 +351,10 @@ private fun LiveView(remote: RemoteController, r: RemoteState, flash: Float, mod
                 )
             }
             val focal by remote.focal.collectAsStateWithLifecycle()
+            val target by remote.zoomTarget.collectAsStateWithLifecycle()
             val range = r.zoomRange
             if (focal != null && range != null) {
-                ZoomGauge(focal!!, range, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+                ZoomGauge(focal!!, target, range, Modifier.align(Alignment.BottomCenter).padding(12.dp))
             }
             if (flash > 0f) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = flash)))
         }
@@ -377,6 +394,32 @@ private const val SHARPEN_SHADER = """
         return half4(clamp(c.rgb + (c.rgb - blur.rgb) * amount, 0.0, 1.0), c.a);
     }
 """
+
+/**
+ * Pincer la visée règle une focale cible (écarter les doigts de ×1,5 = focale ×1,5), que
+ * l'objectif rejoint au fil du geste. Un seul doigt reste pour la mise au point.
+ */
+private fun Modifier.pinchToZoom(remote: RemoteController): Modifier = pointerInput(remote) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        var start: Int? = null
+        var scale = 1f
+        do {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            if (event.changes.count { it.pressed } >= 2) {
+                if (start == null) {
+                    start = remote.focal.value ?: break
+                    remote.pinchStarted()
+                }
+                scale *= event.calculateZoom()
+                remote.zoomTo((start * scale).roundToInt())
+                // Consommé : le toucher à un doigt (mise au point) ne se déclenche pas
+                event.changes.forEach { it.consume() }
+            }
+        } while (event.changes.any { it.pressed })
+        if (start != null) remote.pinchEnded()
+    }
+}
 
 private fun Modifier.pointerInputTap(onTap: (Offset) -> Unit) = this.then(
     Modifier.pointerInput(Unit) { detectTapGestures(onTap = onTap) }

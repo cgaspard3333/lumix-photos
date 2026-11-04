@@ -22,6 +22,7 @@ import java.net.DatagramSocket
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import kotlin.math.abs
+import kotlin.math.ln
 
 data class RemoteState(
     val active: Boolean = false,
@@ -323,6 +324,102 @@ class RemoteController(
 
     fun zoomStop() = command { it.zoomStop() }
 
+    /** Focale visée par un pincement sur la visée, affichée sur la jauge (null hors geste). */
+    private val _zoomTarget = MutableStateFlow<Int?>(null)
+    val zoomTarget: StateFlow<Int?> = _zoomTarget.asStateFlow()
+    private var zoomJob: Job? = null
+
+    /**
+     * Zoom au pincement. L'appareil ne sait pas aller à une focale donnée, seulement zoomer,
+     * dézoomer (lent ou rapide) et s'arrêter : on l'asservit sur la focale lue dans la visée.
+     */
+    fun zoomTo(target: Int) {
+        val range = _state.value.zoomRange ?: return
+        _zoomTarget.value = target.coerceIn(range)
+        if (zoomJob?.isActive == true) return
+        zoomJob = scope.launch(Dispatchers.IO) {
+            val c = client() ?: return@launch
+            var sent: String? = null
+            val deadline = SystemClock.elapsedRealtime() + 15_000
+            // Vitesse du zoom (log focale / s), pour anticiper l'inertie de l'objectif et le retard de la visée
+            var lastLog = ln((_focal.value ?: return@launch).toDouble())
+            var lastAt = SystemClock.elapsedRealtime()
+            var speed = 0.0
+            var settleUntil = 0L
+            var corrections = 0
+            var moveStartedAt = 0L
+            try {
+                while (isActive && SystemClock.elapsedRealtime() < deadline) {
+                    val goal = _zoomTarget.value ?: break
+                    val focal = _focal.value ?: break
+                    val now = SystemClock.elapsedRealtime()
+                    val log = ln(focal.toDouble())
+                    if (log != lastLog && now > lastAt) {
+                        speed = speed * 0.5 + (log - lastLog) / ((now - lastAt) / 1000.0) * 0.5
+                        lastLog = log
+                        lastAt = now
+                    } else if (now - lastAt > 250) {
+                        speed = 0.0
+                    }
+                    if (sent != null) {
+                        // En mouvement : on coupe là où l'objectif s'arrêtera, compte tenu de son inertie
+                        // Au démarrage, la vitesse mesurée est sous-estimée (objectif à l'arrêt, visée en retard) :
+                        // on retient au moins la vitesse typique de l'allure demandée
+                        val typical = if (sent!!.endsWith("fast")) FAST_SPEED else NORMAL_SPEED
+                        val effective = (if (sent!!.startsWith("tele")) 1 else -1) * maxOf(kotlin.math.abs(speed), typical)
+                        // Aux extrémités, pas de freinage : l'objectif s'arrête de lui-même en butée
+                        val aim = when (goal) {
+                            range.last -> goal * 1.3
+                            range.first -> goal / 1.3
+                            else -> goal.toDouble()
+                        }
+                        val predicted = ln(aim) - (log + effective * ZOOM_LEAD_S)
+                        val overshooting = if (sent!!.startsWith("tele")) predicted < STOP_GAP else predicted > -STOP_GAP
+                        // Focale figée alors qu'on zoome : l'objectif est en butée
+                        val blocked = now - lastAt > 500 && now - moveStartedAt > 500
+                        if (overshooting || blocked) {
+                            runCatching { http.withPermit { c.zoomStop() } }
+                            sent = null
+                            settleUntil = now + SETTLE_MS
+                        } else if (sent!!.endsWith("fast") && kotlin.math.abs(predicted) < FAST_GAP) {
+                            // À l'approche : passage en vitesse lente
+                            val slow = sent!!.replace("fast", "normal")
+                            runCatching { http.withPermit { c.zoom(slow) } }
+                            sent = slow
+                        }
+                    } else if (now >= settleUntil) {
+                        // Immobile : on corrige seulement si l'écart reste visible
+                        val gap = ln(goal.toDouble()) - log
+                        if (kotlin.math.abs(gap) < SETTLED_GAP || (!pinching && corrections >= MAX_CORRECTIONS)) {
+                            if (!pinching) break
+                        } else {
+                            val tele = gap > 0
+                            val command = (if (tele) "tele" else "wide") + if (kotlin.math.abs(gap) > FAST_GAP) "-fast" else "-normal"
+                            runCatching { http.withPermit { c.zoom(command) } }
+                            sent = command
+                            moveStartedAt = now
+                            if (!pinching) corrections++
+                        }
+                    }
+                    delay(30)
+                }
+            } finally {
+                if (sent != null) runCatching { http.withPermit { c.zoomStop() } }
+                if (!pinching) _zoomTarget.value = null
+            }
+        }
+    }
+
+    @Volatile private var pinching = false
+
+    fun pinchStarted() { pinching = true }
+
+    /** Fin du geste : l'objectif termine sa course vers la cible puis s'arrête. */
+    fun pinchEnded() {
+        pinching = false
+        if (zoomJob?.isActive != true) _zoomTarget.value = null
+    }
+
     /** [x] et [y] entre 0 et 1 sur l'image de la visée. */
     fun focusAt(x: Float, y: Float) = command { it.touchFocus((x * 1000).toInt().coerceIn(0, 1000), (y * 1000).toInt().coerceIn(0, 1000)) }
 
@@ -360,5 +457,17 @@ class RemoteController(
     private companion object {
         const val PREFERRED_PORT = 49199
         const val FOCAL_FROM_END = 78
+        /** Temps (s) pendant lequel l'objectif continue après l'ordre d'arrêt, retard de la visée compris. */
+        const val ZOOM_LEAD_S = 0.3
+        /** Écarts en log de focale : arrêt anticipé à ±2 %, tolérance finale ±5 %, rapide au-delà de ±50 %. */
+        const val STOP_GAP = 0.02
+        const val SETTLED_GAP = 0.05
+        const val FAST_GAP = 0.4
+        /** Attente après un arrêt, le temps que l'objectif s'immobilise et que la visée le montre. */
+        const val SETTLE_MS = 400L
+        const val MAX_CORRECTIONS = 3
+        /** Vitesses typiques du FZ1000 en log de focale par seconde (allure lente / rapide). */
+        const val NORMAL_SPEED = 0.6
+        const val FAST_SPEED = 1.0
     }
 }
