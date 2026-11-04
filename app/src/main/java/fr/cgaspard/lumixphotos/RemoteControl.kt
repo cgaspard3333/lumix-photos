@@ -111,6 +111,7 @@ class RemoteController(
     private var pollJob: Job? = null
     private var startJob: Job? = null
     @Volatile private var lastFrameAt = 0L
+    private var lowResFixAt = 0L
     /** Orientation de l'appareil lue dans la visée (code EXIF), pour redresser l'image affichée. */
     @Volatile private var orientation = 1
     @Volatile private var streaming = false
@@ -126,9 +127,6 @@ class RemoteController(
                 http.withPermit { c.recMode() }
                 // Le temps que l'objectif sorte et que l'appareil bascule
                 delay(1_500)
-                // Meilleure définition de visée (640×432 au lieu de 320×216) ; prise en compte au
-                // démarrage de la visée seulement, d'où ce réglage avant startStream
-                runCatching { http.withPermit { c.setSetting("liveviewsize", "vga") } }
                 startStream()
                 _state.update { it.copy(active = true, starting = false) }
                 startPolling()
@@ -197,6 +195,9 @@ class RemoteController(
     private suspend fun startStream() {
         val c = client() ?: return
         val s = socket ?: openSocket().also { socket = it }
+        // Meilleure définition (640×432 au lieu de 320×216). L'appareil ne la prend en compte qu'au
+        // démarrage de la visée et repart en basse définition à chaque relance : on la redemande ici.
+        runCatching { http.withPermit { c.setSetting("liveviewsize", "vga") } }
         http.withPermit { c.startStream(s.localPort) }
         streaming = true
         lastFrameAt = SystemClock.elapsedRealtime()
@@ -233,6 +234,11 @@ class RemoteController(
             // Orientation de l'appareil (code EXIF : 1 horizontal, 6 et 8 vertical, 3 retourné)
             if (soi > ORIENTATION_OFFSET) orientation = buf[ORIENTATION_OFFSET].toInt() and 0xFF
             val bitmap = BitmapFactory.decodeByteArray(buf, soi, packet.length - soi) ?: continue
+            // Visée retombée en basse définition malgré tout : on la relance en VGA (une fois toutes les 10 s au plus)
+            if (bitmap.width < 600 && SystemClock.elapsedRealtime() - lowResFixAt > 10_000) {
+                lowResFixAt = SystemClock.elapsedRealtime()
+                scope.launch(Dispatchers.IO) { runCatching { startStream() } }
+            }
             _frame.value = bitmap.rotatedFor(orientation).asImageBitmap()
             lastFrameAt = SystemClock.elapsedRealtime()
         }
