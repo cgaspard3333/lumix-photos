@@ -160,14 +160,25 @@ private fun App(vm: CameraSession) {
 
     // Au retour dans l'appli : des photos ont pu être effacées de la galerie entre-temps
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshDownloaded() }
+    BackHandler(enabled = s.selectionMode && viewerIndex == null) { vm.exitSelection() }
 
     Scaffold(
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    if (connected && s.selectionMode) {
+                        IconButton(onClick = vm::exitSelection) { Icon(Icons.Default.Close, "Quitter la sélection") }
+                    }
+                },
                 title = {
                     Column {
-                        Text("Lumix Photos")
-                        if (connected) Subtitle(s)
+                        if (connected && s.selectionMode) {
+                            val n = s.selected.size
+                            Text(if (n > 1) "$n sélectionnés" else "$n sélectionné", maxLines = 1)
+                        } else {
+                            Text("Lumix Photos")
+                            if (connected) Subtitle(s)
+                        }
                     }
                 },
                 actions = { if (connected) TopActions(s, vm) },
@@ -219,13 +230,16 @@ private fun Subtitle(s: UiState) {
 
 @Composable
 private fun TopActions(s: UiState, vm: CameraSession) {
-    if (s.viewMode == ViewMode.GRID) {
+    // En mode sélection, on laisse la place au nombre de fichiers sélectionnés
+    if (s.viewMode == ViewMode.GRID && !s.selectionMode) {
         IconButton(onClick = { vm.setColumns(s.columns + 1) }, enabled = s.columns < CameraSession.MAX_COLUMNS) {
             Icon(Icons.Default.ZoomOut, "Vignettes plus petites")
         }
         IconButton(onClick = { vm.setColumns(s.columns - 1) }, enabled = s.columns > CameraSession.MIN_COLUMNS) {
             Icon(Icons.Default.ZoomIn, "Vignettes plus grandes")
         }
+    }
+    if (s.viewMode == ViewMode.GRID) {
         IconButton(onClick = { vm.setViewMode(ViewMode.DETAILS) }) {
             Icon(Icons.AutoMirrored.Filled.ViewList, "Vue détails")
         }
@@ -364,8 +378,8 @@ private fun Gallery.itemsBetween(a: Int, b: Int): List<CameraItem> =
     (min(a, b)..max(a, b)).mapNotNull { (entries.getOrNull(it) as? FileEntry)?.item }
 
 /**
- * Appui long : sans bouger, ouvre le plein écran au relâchement ; en glissant, sélectionne
- * (ou désélectionne) tous les fichiers entre le premier et celui sous le doigt.
+ * Appui long : sans bouger, coche le fichier (et passe en mode sélection) ; en glissant,
+ * sélectionne (ou désélectionne) tous les fichiers entre le premier et celui sous le doigt.
  */
 @Composable
 private fun Modifier.selectionGestures(
@@ -374,7 +388,6 @@ private fun Modifier.selectionGestures(
     vm: CameraSession,
     itemAt: (Offset) -> Int?,
     scrollBy: suspend (Float) -> Unit,
-    openViewer: (CameraItem) -> Unit,
 ): Modifier {
     val haptics = LocalHapticFeedback.current
     val currentGallery by rememberUpdatedState(gallery)
@@ -451,7 +464,8 @@ private fun Modifier.selectionGestures(
             }
             autoScroll = 0f
             drag = null
-            if (!dragging) openViewer(startItem)
+            // Appui long sans glisser : passe en mode sélection avec ce fichier coché
+            if (!dragging) vm.toggle(startItem)
         }
     }
 }
@@ -484,7 +498,7 @@ private fun PhotoGrid(gallery: Gallery, s: UiState, vm: CameraSession, openViewe
             state = state,
             modifier = Modifier
                 .fillMaxSize()
-                .selectionGestures(gallery, s, vm, state::itemAt, { state.scrollBy(it) }, openViewer),
+                .selectionGestures(gallery, s, vm, state::itemAt, { state.scrollBy(it) }),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -502,7 +516,9 @@ private fun PhotoGrid(gallery: Gallery, s: UiState, vm: CameraSession, openViewe
                         downloaded = s.isDownloaded(entry.item),
                         compact = s.columns >= 6,
                         vm = vm,
-                        modifier = Modifier.aspectRatio(1f).clickable { vm.toggle(entry.item) },
+                        modifier = Modifier.aspectRatio(1f).clickable {
+                            if (s.selectionMode) vm.toggle(entry.item) else openViewer(entry.item)
+                        },
                     )
                 }
             }
@@ -525,7 +541,7 @@ private fun DetailsList(gallery: Gallery, s: UiState, vm: CameraSession, openVie
             state = state,
             modifier = Modifier
                 .fillMaxSize()
-                .selectionGestures(gallery, s, vm, state::itemAt, { state.scrollBy(it) }, openViewer),
+                .selectionGestures(gallery, s, vm, state::itemAt, { state.scrollBy(it) }),
         ) {
             items(
                 count = gallery.entries.size,
@@ -534,7 +550,7 @@ private fun DetailsList(gallery: Gallery, s: UiState, vm: CameraSession, openVie
             ) { index ->
                 when (val entry = gallery.entries[index]) {
                     is DayHeader -> SectionHeader(entry, gallery.itemsOfSection(index), s, vm)
-                    is FileEntry -> DetailRow(entry.item, s, vm)
+                    is FileEntry -> DetailRow(entry.item, s, vm, openViewer)
                 }
             }
         }
@@ -558,12 +574,17 @@ private fun SectionHeader(header: DayHeader, items: List<CameraItem>, s: UiState
             Text(header.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Text("${header.count} fichier(s)", style = MaterialTheme.typography.bodySmall)
         }
-        IconButton(onClick = { vm.toggleDay(items) }) {
-            if (allSelected) {
-                Icon(Icons.Default.CheckCircle, "Désélectionner ce jour", tint = MaterialTheme.colorScheme.primary)
-            } else {
-                Icon(Icons.Outlined.Circle, "Sélectionner ce jour")
+        if (s.selectionMode) {
+            IconButton(onClick = { vm.toggleDay(items) }) {
+                if (allSelected) {
+                    Icon(Icons.Default.CheckCircle, "Désélectionner ce jour", tint = MaterialTheme.colorScheme.primary)
+                } else {
+                    Icon(Icons.Outlined.Circle, "Sélectionner ce jour")
+                }
             }
+        } else {
+            // Même hauteur de ligne que l'icône du mode sélection : rien ne bouge en y entrant
+            Spacer(Modifier.size(48.dp))
         }
     }
 }
@@ -577,12 +598,12 @@ private fun describe(item: CameraItem, meta: FileMeta?) = listOf(
 ).joinToString(" · ")
 
 @Composable
-private fun DetailRow(item: CameraItem, s: UiState, vm: CameraSession) {
+private fun DetailRow(item: CameraItem, s: UiState, vm: CameraSession, openViewer: (CameraItem) -> Unit) {
     val selected = item.id in s.selected
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { vm.toggle(item) }
+            .clickable { if (s.selectionMode) vm.toggle(item) else openViewer(item) }
             .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
             .padding(start = 8.dp, end = 40.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -613,7 +634,7 @@ private fun DetailRow(item: CameraItem, s: UiState, vm: CameraSession) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Checkbox(checked = selected, onCheckedChange = { vm.toggle(item) })
+        if (s.selectionMode) Checkbox(checked = selected, onCheckedChange = { vm.toggle(item) })
     }
 }
 
@@ -912,6 +933,15 @@ private fun BottomPanel(s: UiState, vm: CameraSession) {
             val d = s.download
             if (d != null) {
                 DownloadProgressPanel(d, vm)
+            } else if (!s.selectionMode) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(onClick = vm::enterSelection) {
+                        Icon(Icons.Outlined.Circle, null)
+                        Text("  Sélectionner")
+                    }
+                    Spacer(Modifier.weight(1f))
+                    SelectionMenu(s, vm, label = "Sélection rapide ▾")
+                }
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SelectionMenu(s, vm)
@@ -936,14 +966,14 @@ private fun BottomPanel(s: UiState, vm: CameraSession) {
 }
 
 @Composable
-private fun SelectionMenu(s: UiState, vm: CameraSession) {
+private fun SelectionMenu(s: UiState, vm: CameraSession, label: String = "Sélection ▾") {
     var open by remember { mutableStateOf(false) }
     val visible = s.visibleItems
     val photos = visible.count { !it.isVideo }
     val videos = visible.size - photos
     val fresh = visible.count { !s.isDownloaded(it) }
     Box {
-        TextButton(onClick = { open = true }) { Text("Sélection ▾") }
+        TextButton(onClick = { open = true }) { Text(label) }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(text = { Text("Tout ($photos + $videos)") }, onClick = { open = false; vm.selectAll() })
             DropdownMenuItem(text = { Text("Photos uniquement ($photos)") }, onClick = { open = false; vm.selectPhotos() })
@@ -956,7 +986,7 @@ private fun SelectionMenu(s: UiState, vm: CameraSession) {
                 onClick = { open = false; vm.clearSelection() },
             )
             Text(
-                "Astuce : appui long puis glisser pour sélectionner une série",
+                "Astuce : appui long sur un fichier pour le sélectionner, puis glisser pour en sélectionner toute une série",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).width(220.dp),

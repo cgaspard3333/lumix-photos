@@ -16,8 +16,10 @@ Téléchargez l'APK de la dernière version dans les
   rejoint ensuite seul le Wi-Fi de l'appareil, et le rejoint de nouveau après une coupure.
 - **Galerie** : grille regroupée par jour (2 à 8 colonnes, pincer pour zoomer), vue détails
   (nom, date, taille, type, 4K/1080p), défilement rapide par mois, filtre photos/vidéos/non téléchargés.
-- **Sélection** : par jour, par type, « pas encore téléchargés », ou appui long puis glisser.
-- **Plein écran** : appui long sur une vignette.
+- **Plein écran** : toucher une vignette (zoom en pinçant ou par double appui, bouton « Ouvrir »
+  pour une copie déjà sur le téléphone).
+- **Sélection** : bouton « Sélectionner » ou appui long sur une vignette, puis glisser pour une
+  série ; aussi par jour, par type ou « pas encore téléchargés ».
 - **Téléchargement** en arrière-plan avec notification, par morceaux de 8 Mo (les vignettes
   restent fluides pendant une vidéo 4K), reprise automatique après une coupure Wi-Fi, photos en
   taille originale ou réduite (1620×1080, environ 8× plus rapide). Les fichiers déjà présents sur

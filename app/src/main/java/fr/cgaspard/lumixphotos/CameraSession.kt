@@ -111,6 +111,8 @@ data class UiState(
     /** Métadonnées connues, par nom de fichier. */
     val meta: Map<String, FileMeta> = emptyMap(),
     val selected: Set<String> = emptySet(),
+    /** Hors de ce mode, toucher un fichier l'ouvre en grand ; dedans, le coche ou le décoche. */
+    val selectionMode: Boolean = false,
     /** Copies présentes dans la galerie du téléphone, par nom de fichier. */
     val localCopies: Map<String, List<MediaSaver.LocalCopy>> = emptyMap(),
     val viewMode: ViewMode = ViewMode.GRID,
@@ -247,7 +249,10 @@ class CameraSession(private val app: Application) {
         rejoinJob?.cancel()
         releaseCameraWifi()
         _state.update {
-            it.copy(connection = ConnectionState.Disconnected, items = emptyList(), selected = emptySet(), download = null, battery = null)
+            it.copy(
+                connection = ConnectionState.Disconnected, items = emptyList(), selected = emptySet(),
+                selectionMode = false, download = null, battery = null,
+            )
         }
     }
 
@@ -422,20 +427,25 @@ class CameraSession(private val app: Application) {
         }
     }
 
+    fun enterSelection() = _state.update { it.copy(selectionMode = true) }
+
+    fun exitSelection() = _state.update { it.copy(selectionMode = false, selected = emptySet()) }
+
+    /** Coche ou décoche un fichier (et passe en mode sélection, ex. depuis un appui long). */
     fun toggle(item: CameraItem) = _state.update {
-        it.copy(selected = if (item.id in it.selected) it.selected - item.id else it.selected + item.id)
+        it.copy(selected = if (item.id in it.selected) it.selected - item.id else it.selected + item.id, selectionMode = true)
     }
 
     /** Sélectionne / désélectionne tous les fichiers d'un jour. */
     fun toggleDay(items: List<CameraItem>) = _state.update { s ->
         val ids = items.map { it.id }
-        s.copy(selected = if (s.selected.containsAll(ids)) s.selected - ids.toSet() else s.selected + ids)
+        s.copy(selected = if (s.selected.containsAll(ids)) s.selected - ids.toSet() else s.selected + ids, selectionMode = true)
     }
 
     /** Sélection par glissement : [base] est la sélection au début du geste. */
     fun dragSelect(base: Set<String>, range: List<CameraItem>, select: Boolean) = _state.update { s ->
         val ids = range.map { it.id }
-        s.copy(selected = if (select) base + ids else base - ids.toSet())
+        s.copy(selected = if (select) base + ids else base - ids.toSet(), selectionMode = true)
     }
 
     // Les sélections rapides portent sur ce qui est affiché (filtre compris)
@@ -446,7 +456,7 @@ class CameraSession(private val app: Application) {
     fun clearSelection() = _state.update { it.copy(selected = emptySet()) }
 
     private fun select(predicate: (CameraItem) -> Boolean) = _state.update { s ->
-        s.copy(selected = s.visibleItems.filter(predicate).mapTo(mutableSetOf()) { it.id })
+        s.copy(selected = s.visibleItems.filter(predicate).mapTo(mutableSetOf()) { it.id }, selectionMode = true)
     }
 
     fun setViewMode(mode: ViewMode) {
@@ -543,7 +553,8 @@ class CameraSession(private val app: Application) {
                 append("\n${formatSize(doneBytes)} en ${formatDuration(seconds)}")
                 if (errors.isNotEmpty()) append("\n${errors.size} échec(s) : ${errors.first()}")
             }
-            _state.update { it.copy(download = null, message = msg) }
+            // Tout est téléchargé : on quitte le mode sélection
+            _state.update { it.copy(download = null, message = msg, selectionMode = it.selected.isNotEmpty()) }
             refreshDownloaded()
         }
         // Garde le processus en vie (et le Wi-Fi actif) si l'appli passe en arrière-plan
