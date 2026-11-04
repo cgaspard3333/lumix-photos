@@ -52,5 +52,8 @@ class CameraMenuTest {
         assertEquals("1/16000", shutter.first())
         assertEquals("60 s", shutter.last())
         assertTrue("1/1000" in shutter && "1/60" in shutter)
+        // Mode M : vitesse lente renvoyée sous forme de valeur sentinelle
+        val manual = CameraMenu.lensLimits("ok,1536/256,761/256,3584/256,16384/256,0,on,400,25,on,128/1024,on")!!
+        assertEquals(shutter, CameraMenu.shutterSetting(manual).options.map { it.label })
     }
 }

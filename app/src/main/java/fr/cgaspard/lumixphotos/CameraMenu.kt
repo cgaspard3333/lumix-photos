@@ -114,6 +114,9 @@ object CameraMenu {
         0.4, 0.5, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5, 3.2, 4.0, 5.0, 6.0, 8.0, 10.0, 13.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0,
     )
 
+    /** Pose la plus longue (60 s) en 1/256 d'IL. */
+    private const val SLOWEST_SHUTTER_APEX = -1536
+
     /** Bornes (Av min, Av max, Tv min, Tv max) en 1/256 d'IL, ex. « ok,1536/256,761/256,3584/256,-1536/256,… ». */
     data class LensLimits(val minAv: Int, val maxAv: Int, val minTv: Int, val maxTv: Int)
 
@@ -124,7 +127,8 @@ object CameraMenu {
         val maxAv = apex(parts[1]) ?: return null
         val minAv = apex(parts[2]) ?: return null
         val maxTv = apex(parts[3]) ?: return null
-        val minTv = apex(parts[4]) ?: return null
+        // En mode M, l'appareil renvoie ici une valeur sentinelle (16384/256) : on prend alors 60 s
+        val minTv = apex(parts[4])?.takeIf { it < maxTv } ?: SLOWEST_SHUTTER_APEX
         return LensLimits(minAv, maxAv, minTv, maxTv)
     }
 

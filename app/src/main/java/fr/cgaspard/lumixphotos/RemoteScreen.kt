@@ -335,7 +335,9 @@ private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet
                 item(key = "hint") {
                     Text(
                         "Les réglages proposés dépendent de la molette de l'appareil : en mode auto intelligent (iA), " +
-                            "la plupart sont verrouillés ; passez sur P, A, S ou M pour tous les débloquer.",
+                            "la plupart sont verrouillés ; passez sur P, A, S ou M pour les débloquer. Rafale, retardateur " +
+                            "et bracketing se choisissent sur l'appareil. « — » : valeur que l'appareil ne communique pas " +
+                            "(elle s'affiche dès qu'on la change ici).",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
