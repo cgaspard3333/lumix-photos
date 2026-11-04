@@ -101,8 +101,17 @@ data class Battery(val level: Int, val max: Int) {
     override fun toString() = "$level/$max"
 }
 
+/** Ce que l'utilisateur fait une fois connecté. */
+enum class Destination { GALLERY, REMOTE }
+
 data class UiState(
     val hostInput: String = "",
+    /** Null juste après la connexion : l'appli demande prise de vue ou transfert. */
+    val destination: Destination? = null,
+    /** Lecture de la carte SD en cours (message affiché). */
+    val loadingCard: String? = null,
+    /** La carte a été lue au moins une fois pendant cette connexion. */
+    val cardLoaded: Boolean = false,
     val wifiSsid: String = "",
     val wifiPassword: String = "",
     val connection: ConnectionState = ConnectionState.Disconnected,
@@ -161,6 +170,8 @@ class CameraSession(private val app: Application) {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var client: LumixClient? = null
+    /** Nom UPnP de l'appareil (ex. FZ1000-A1B2C3), pour retrouver le cache de ses cartes. */
+    private var cameraName: String? = null
     private var cameraWifi: ConnectivityManager.NetworkCallback? = null
     private var rejoinJob: Job? = null
     private var keepAliveJob: Job? = null
@@ -205,20 +216,17 @@ class CameraSession(private val app: Application) {
                     prefs.edit().putString(KEY_HOST, host).apply()
                     _state.update { it.copy(hostInput = host, battery = parseBattery(cameraState)) }
                     // Mémorise le nom du Wi-Fi de l'appareil pour la connexion automatique suivante
-                    val cameraName = c.friendlyName()
-                    if (cameraName != null && _state.value.wifiSsid.isEmpty()) setWifi(cameraName, _state.value.wifiPassword)
-                    working("Lecture de la carte SD…")
-                    val items = c.listItems()
-                    working("Identification de la carte SD…")
-                    val meta = metaCache.selectCard(cameraName ?: host, items) { item ->
-                        runCatching { c.fetchMeta(item.originalUrl) }.getOrNull()
-                    }
+                    cameraName = c.friendlyName()
+                    if (cameraName != null && _state.value.wifiSsid.isEmpty()) setWifi(cameraName!!, _state.value.wifiPassword)
+                    // La carte n'est lue que si l'on va dans la galerie : on demande d'abord quoi faire
                     _state.update {
-                        it.copy(connection = ConnectionState.Connected(host), items = items, meta = meta, selected = emptySet())
+                        it.copy(
+                            connection = ConnectionState.Connected(host), destination = null, cardLoaded = false,
+                            items = emptyList(), meta = emptyMap(), selected = emptySet(),
+                        )
                     }
                 }
                 startKeepAlive()
-                startMetaLoader()
             } catch (e: Exception) {
                 client = null
                 releaseCameraWifi()
@@ -257,7 +265,7 @@ class CameraSession(private val app: Application) {
         _state.update {
             it.copy(
                 connection = ConnectionState.Disconnected, items = emptyList(), selected = emptySet(),
-                selectionMode = false, download = null, battery = null,
+                selectionMode = false, download = null, battery = null, destination = null, cardLoaded = false,
             )
         }
     }
@@ -394,9 +402,13 @@ class CameraSession(private val app: Application) {
     private fun lostConnection(e: Exception) {
         keepAliveJob?.cancel()
         metaJob?.cancel()
+        remote.reset()
         client = null
         _state.update {
-            it.copy(connection = ConnectionState.Failed("Connexion perdue : ${e.message}"), download = null)
+            it.copy(
+                connection = ConnectionState.Failed("Connexion perdue : ${e.message}"), download = null,
+                destination = null, cardLoaded = false, loadingCard = null,
+            )
         }
     }
 
@@ -631,29 +643,61 @@ class CameraSession(private val app: Application) {
     fun enterRemote() {
         if (client == null || downloadJob?.isActive == true) return
         metaJob?.cancel()
+        _state.update { it.copy(destination = Destination.REMOTE, selectionMode = false, selected = emptySet()) }
         remote.start()
     }
 
-    /** Revient à la galerie ; les photos et vidéos prises entre-temps apparaissent. */
-    fun exitRemote() {
-        scope.launch {
-            remote.stop()
-            // Juste après le retour en lecture, l'appareil peut encore refuser la liste : on réessaie un peu
-            val c = client ?: return@launch
+    /** Galerie : la carte est lue à la première visite (ou relue en revenant de la prise de vue). */
+    fun openGallery() {
+        remote.messageShown()
+        _state.update { it.copy(destination = Destination.GALLERY) }
+        if (!_state.value.cardLoaded) scope.launch { loadCard() }
+    }
+
+    private suspend fun loadCard(): Boolean {
+        val c = client ?: return false
+        _state.update { it.copy(loadingCard = "Lecture de la carte SD…") }
+        try {
+            // Juste après la prise de vue, l'appareil peut encore refuser la liste : on réessaie un peu
             var listed: List<CameraItem>? = null
             for (attempt in 1..8) {
                 listed = runCatching { withContext(Dispatchers.IO) { cameraHttp.withPermit { c.listItems() } } }.getOrNull()
                 if (listed != null) break
                 delay(1_500)
             }
-            val items = listed ?: return@launch lostConnection(IOException("l'appareil ne répond plus après la prise de vue"))
+            val items = listed ?: run {
+                lostConnection(IOException("l'appareil ne répond pas à la lecture de la carte"))
+                return false
+            }
+            if (!_state.value.cardLoaded) {
+                _state.update { it.copy(loadingCard = "Identification de la carte SD…") }
+                val meta = withContext(Dispatchers.IO) {
+                    metaCache.selectCard(cameraName ?: c.host, items) { item ->
+                        runCatching { cameraHttp.withPermit { c.fetchMeta(item.originalUrl) } }.getOrNull()
+                    }
+                }
+                _state.update { it.copy(meta = meta) }
+            }
             _state.update { s ->
                 val ids = items.mapTo(HashSet()) { it.id }
-                s.copy(items = items, selected = s.selected.filterTo(mutableSetOf()) { it in ids })
+                s.copy(items = items, cardLoaded = true, selected = s.selected.filterTo(mutableSetOf()) { it in ids })
             }
-            startKeepAlive()
             startMetaLoader()
             refreshDownloaded()
+            return true
+        } finally {
+            _state.update { it.copy(loadingCard = null) }
+        }
+    }
+
+    /** Revient à la galerie ; les photos et vidéos prises entre-temps apparaissent. */
+    /** Quitte la prise de vue vers la galerie ; la carte est relue pour afficher les nouvelles photos. */
+    fun exitRemote() {
+        scope.launch {
+            remote.stop()
+            _state.update { it.copy(destination = Destination.GALLERY) }
+            startKeepAlive()
+            loadCard()
         }
     }
 

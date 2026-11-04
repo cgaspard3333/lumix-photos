@@ -1,5 +1,12 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowCompat
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import android.app.Activity
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -128,6 +135,20 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
     val scope = rememberCoroutineScope()
 
     BackHandler { vm.exitRemote() }
+    // Plein écran : la visée récupère la place des barres système (un glissement depuis le bord les montre)
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val window = (view.context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        // Pas de mise en veille pendant qu'on cadre
+        view.keepScreenOn = true
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            view.keepScreenOn = false
+        }
+    }
     // Pas de visée (ni de trafic Wi-Fi inutile) quand l'appli n'est plus à l'écran
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { remote.pauseStream() }
     LifecycleEventEffect(Lifecycle.Event.ON_START) { remote.resumeStream() }
@@ -179,7 +200,7 @@ internal fun RemoteScreen(vm: CameraSession, s: UiState) {
 @Composable
 private fun StatusBar(r: RemoteState, s: UiState, onBack: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour à la galerie") }
+        IconButton(onClick = onBack) { Icon(Icons.Outlined.PhotoLibrary, "Photos et vidéos de la carte") }
         if (r.recording) {
             Box(Modifier.size(10.dp).background(Color.Red, CircleShape))
             Spacer(Modifier.width(6.dp))

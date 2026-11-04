@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -92,6 +93,11 @@ private fun App(vm: CameraSession) {
         RemoteScreen(vm, s)
         return
     }
+    // Juste après la connexion (ou si la prise de vue n'a pas pu démarrer) : que veut-on faire ?
+    if (connected && s.destination != Destination.GALLERY) {
+        ChooserScreen(s, vm, message = remote.message)
+        return
+    }
 
     val selecting = connected && s.selectionMode
     // En mode sélection, la barre du haut prend une teinte d'accent, comme dans Google Photos
@@ -139,6 +145,7 @@ private fun App(vm: CameraSession) {
             FilterChips(s, vm)
             Box(Modifier.weight(1f)) {
                 when {
+                    s.loadingCard != null && s.items.isEmpty() -> LoadingCard(s.loadingCard!!)
                     visible.isEmpty() -> EmptyState(if (s.items.isEmpty()) "Aucun fichier sur la carte" else "Aucun fichier pour ce filtre")
                     s.viewMode == ViewMode.GRID -> PhotoGrid(gallery, s, vm, openViewer)
                     else -> DetailsList(gallery, s, vm, openViewer)
@@ -171,7 +178,7 @@ private fun App(vm: CameraSession) {
 @Composable
 private fun Subtitle(s: UiState) {
     val parts = buildList {
-        add("${s.items.size} fichiers")
+        add(s.loadingCard ?: "${s.items.size} fichiers")
         if (s.metaLoaded < s.items.size) add("dates ${s.metaLoaded}/${s.items.size}")
         s.battery?.let { add("batterie $it") }
     }
@@ -206,6 +213,18 @@ private fun FilterChips(s: UiState, vm: CameraSession) {
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun LoadingCard(text: String) {
+    Column(
+        Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        CircularProgressIndicator()
+        Text(text, style = MaterialTheme.typography.titleMedium)
     }
 }
 

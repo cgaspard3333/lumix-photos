@@ -168,6 +168,21 @@ class RemoteController(
         _focal.value = null
     }
 
+    /** Connexion perdue : on oublie la session sans rien envoyer à l'appareil. */
+    fun reset() {
+        startJob?.cancel()
+        pollJob?.cancel()
+        zoomJob?.cancel()
+        streaming = false
+        streamJob?.cancel()
+        socket?.close()
+        socket = null
+        _state.value = RemoteState()
+        _frame.value = null
+        _focal.value = null
+        _zoomTarget.value = null
+    }
+
     /** Visée suspendue quand l'appli passe en arrière-plan, reprise au retour. */
     fun pauseStream() = stopStream()
 
