@@ -1,5 +1,7 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,33 +55,80 @@ import androidx.compose.ui.unit.dp
 @Composable
 internal fun ConnectScreen(s: UiState, vm: CameraSession) {
     val working = s.connection as? ConnectionState.Working
-    val context = LocalContext.current
     var ssid by remember(s.wifiSsid) { mutableStateOf(s.wifiSsid) }
     var password by remember(s.wifiPassword) { mutableStateOf(s.wifiPassword) }
     var manual by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
-    val connect = { vm.setWifi(ssid, password); vm.connect() }
 
-    // Sur tablette, contenu centré et limité en largeur plutôt qu'étiré d'un bord à l'autre
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .wrapContentWidth()
-            .widthIn(max = 560.dp)
-            .padding(horizontal = 24.dp, vertical = 32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(112.dp)) {
+    BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()) {
+        // Téléphone en paysage : présentation à gauche, boutons à droite, sans défilement
+        val sideBySide = maxWidth > maxHeight && maxHeight < 560.dp
+        val header = @Composable { ConnectHeader(compact = sideBySide, showSteps = working == null) }
+        val actions = @Composable {
+            ConnectActions(
+                s, vm, working, ssid, password, manual, scanError,
+                onSsid = { ssid = it }, onPassword = { password = it },
+                onManual = { manual = !manual }, onScanError = { scanError = it },
+            )
+        }
+        if (sideBySide) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(32.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) { header() }
+                Column(
+                    Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) { actions() }
+            }
+        } else {
+            // Sur tablette, contenu centré et limité en largeur plutôt qu'étiré d'un bord à l'autre
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .wrapContentWidth()
+                    .widthIn(max = 560.dp)
+                    .padding(horizontal = 24.dp, vertical = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                header()
+                actions()
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnectHeader(compact: Boolean, showSteps: Boolean) {
+    val logo = @Composable { size: Int ->
+        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(size.dp)) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(
                     Icons.Outlined.PhotoCamera, null,
                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(56.dp),
+                    modifier = Modifier.size((size / 2).dp),
                 )
             }
         }
+    }
+    if (compact) {
+        // Paysage sur téléphone : logo et titre sur une ligne, sans phrase d'accroche
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            logo(48)
+            Spacer(Modifier.width(12.dp))
+            Text("Lumix Photos", style = MaterialTheme.typography.headlineSmall)
+        }
+    } else {
+        logo(112)
         Text("Lumix Photos", style = MaterialTheme.typography.headlineMedium)
         Text(
             "Récupérez les photos et vidéos de votre appareil en Wi-Fi.",
@@ -87,7 +136,33 @@ internal fun ConnectScreen(s: UiState, vm: CameraSession) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+    }
+        if (showSteps) {
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(if (compact) 14.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 16.dp)) {
+                    Step(1, "Sur l'appareil : MENU › Wi-Fi › Fonction Wi-Fi › Nouvelle connexion › « Prise de vue à distance et affichage ».")
+                    Step(2, "Scannez le QR code qui s'affiche alors sur l'écran de l'appareil.")
+                }
+            }
+        }
+}
 
+@Composable
+private fun ConnectActions(
+    s: UiState,
+    vm: CameraSession,
+    working: ConnectionState.Working?,
+    ssid: String,
+    password: String,
+    manual: Boolean,
+    scanError: String?,
+    onSsid: (String) -> Unit,
+    onPassword: (String) -> Unit,
+    onManual: () -> Unit,
+    onScanError: (String?) -> Unit,
+) {
+        val context = LocalContext.current
+        val connect = { vm.setWifi(ssid, password); vm.connect() }
         if (working != null) {
             Card(Modifier.fillMaxWidth()) {
                 Column(
@@ -99,31 +174,25 @@ internal fun ConnectScreen(s: UiState, vm: CameraSession) {
                     Text(working.message, textAlign = TextAlign.Center)
                 }
             }
-            return@Column
-        }
-
-        OutlinedCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Step(1, "Sur l'appareil : MENU › Wi-Fi › Fonction Wi-Fi › Nouvelle connexion › « Prise de vue à distance et affichage ».")
-                Step(2, "Scannez le QR code qui s'affiche alors sur l'écran de l'appareil.")
-            }
+            return
         }
 
         Button(
             onClick = {
-                scanError = null
+                onScanError(null)
                 WifiQr.scan(
                     context,
                     onResult = { credentials ->
                         if (credentials == null) {
-                            scanError = "Ce QR code ne contient pas d'identifiants Wi-Fi."
+                            onScanError("Ce QR code ne contient pas d'identifiants Wi-Fi.")
                         } else {
-                            ssid = credentials.ssid
-                            password = credentials.password
-                            connect()
+                            onSsid(credentials.ssid)
+                            onPassword(credentials.password)
+                            vm.setWifi(credentials.ssid, credentials.password)
+                            vm.connect()
                         }
                     },
-                    onError = { scanError = it },
+                    onError = { onScanError(it) },
                 )
             },
             modifier = Modifier.fillMaxWidth().height(56.dp),
@@ -152,7 +221,7 @@ internal fun ConnectScreen(s: UiState, vm: CameraSession) {
             }
         }
 
-        TextButton(onClick = { manual = !manual }) {
+        TextButton(onClick = onManual) {
             Text("Réglages manuels")
             Icon(if (manual) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
         }
@@ -160,14 +229,14 @@ internal fun ConnectScreen(s: UiState, vm: CameraSession) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
                     value = ssid,
-                    onValueChange = { ssid = it },
+                    onValueChange = onSsid,
                     label = { Text("Wi-Fi de l'appareil (ex. FZ1000-A1B2C3)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
                     value = password,
-                    onValueChange = { password = it },
+                    onValueChange = onPassword,
                     label = { Text("Mot de passe (affiché sur l'appareil)") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
@@ -184,7 +253,6 @@ internal fun ConnectScreen(s: UiState, vm: CameraSession) {
                 )
             }
         }
-    }
 }
 
 @Composable

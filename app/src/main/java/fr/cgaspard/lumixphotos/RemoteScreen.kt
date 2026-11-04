@@ -116,20 +116,21 @@ private const val METERING = "menu_item_id_lightmet"
 private const val FLASH = "menu_item_id_flash"
 
 /**
- * Raccourcis sous la visée, adaptés à la position de la molette : ce qu'on règle le plus souvent
- * dans ce mode. Seuls ceux que l'appareil permet de changer sont affichés.
+ * Raccourcis sous la visée : tous les réglages que l'appareil déclare modifiables en ce moment
+ * (rien n'est deviné d'après le mode), les plus utiles en premier.
  */
-private fun quickSettings(mode: ShootingMode?): List<String> = when (mode) {
-    ShootingMode.INTELLIGENT_AUTO -> listOf(EXPOSURE, "menu_item_id_ph_sty", "menu_item_id_asprat", "menu_item_id_quality", "menu_item_id_v_quality")
-    ShootingMode.PROGRAM -> listOf(EXPOSURE, ISO, WB, AF, METERING, FLASH)
-    ShootingMode.APERTURE -> listOf("aperture", EXPOSURE, ISO, WB, AF, METERING)
-    ShootingMode.SHUTTER -> listOf("shutter", EXPOSURE, ISO, WB, AF, METERING)
-    ShootingMode.MANUAL -> listOf("aperture", "shutter", ISO, WB, AF, METERING)
-    ShootingMode.SCENE -> listOf("menu_item_id_scn_gid", EXPOSURE, WB, AF, FLASH)
-    ShootingMode.CREATIVE -> listOf("menu_item_id_crtv_ctrl", EXPOSURE, METERING, "menu_item_id_asprat")
-    ShootingMode.VIDEO -> listOf("menu_item_id_v_quality", EXPOSURE, ISO, WB, AF, "menu_item_id_4kphoto")
-    null -> listOf("aperture", "shutter", EXPOSURE, ISO, WB, AF)
-}
+private val PRIORITY = listOf(
+    "aperture", "shutter", EXPOSURE, ISO, WB, AF, METERING, FLASH,
+    "menu_item_id_scn_gid", "menu_item_id_crtv_ctrl", "menu_item_id_ph_sty", "menu_item_id_v_quality",
+    "menu_item_id_4kphoto", "menu_item_id_asprat", "menu_item_id_quality", "menu_item_id_pctsiz",
+)
+
+private fun quickSettings(r: RemoteState): List<CameraSetting> =
+    r.settings.filter { r.isEditable(it) && it.id != "menu_item_id_liveview_quality" }
+        .sortedBy { PRIORITY.indexOf(it.id).let { i -> if (i < 0) PRIORITY.size else i } }
+        .take(QUICK_COUNT)
+
+private const val QUICK_COUNT = 8
 
 private sealed interface Sheet {
     data object All : Sheet
@@ -657,8 +658,8 @@ private fun QuickSettings(r: RemoteState, open: (Sheet) -> Unit) {
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        for (id in quickSettings(r.mode)) {
-            val setting = byId[id]?.takeIf { r.isEditable(it) } ?: continue
+        for (setting in quickSettings(r)) {
+            val id = setting.id
             // Grisé quand la molette ne permet pas de le changer (la valeur choisie par l'appareil reste affichée)
             AssistChip(
                 onClick = { open(Sheet.One(id)) },

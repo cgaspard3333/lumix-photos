@@ -59,8 +59,9 @@ data class RemoteState(
 
     /** Le réglage peut-il être changé depuis l'appli dans la position actuelle de la molette ? */
     fun isEditable(setting: CameraSetting): Boolean = when (setting.id) {
-        "aperture" -> mode?.apertureEditable ?: true
-        "shutter" -> mode?.shutterEditable ?: true
+        // L'appareil accepte ouverture et vitesse en Wi-Fi dans tous les modes (vérifié en iA sur
+        // FZ1000) ; s'il refuse dans un mode, l'erreur est affichée
+        "aperture", "shutter" -> true
         else -> setting.options.any { isEnabled(it) }
     }
 
@@ -491,7 +492,14 @@ class RemoteController(
             } catch (e: Exception) {
                 _state.update { it.copy(message = "${setting.title} : ${e.message}") }
             }
+            delay(500)
+            // L'appareil répond parfois « ok » sans appliquer la valeur (ex. ISO en iA) : on relit
+            val applied = runCatching { CameraMenu.currentValue(http.withPermit { c.getSetting(setting.type) }, setting.type) }.getOrNull()
+            if (applied != null && applied.first != option.value && setting.type !in APEX_SETTINGS) {
+                _state.update { it.copy(message = "${setting.title} : non pris en compte par l'appareil dans ce mode") }
+            }
             // Un réglage peut en rendre d'autres disponibles ou non (format → taille d'image…)
+            setAt.remove(setting.type)
             refreshValues(c, _state.value.settings.map { it.type }.distinct())
         }
     }
@@ -525,6 +533,8 @@ class RemoteController(
     private companion object {
         const val PREFERRED_PORT = 49199
         const val FOCAL_FROM_END = 78
+        /** L'appareil arrondit ouverture et vitesse : une valeur relue un peu différente reste « prise en compte ». */
+        val APEX_SETTINGS = setOf("focal", "shtrspeed")
         /** Réglages relus à chaque tour : ceux du rappel d'exposition et des raccourcis courants. */
         val LIVE_TYPES = listOf("focal", "shtrspeed", "exposure", "iso", "whitebalance", "lightmetering", "flash")
         /** Position de l'orientation dans l'en-tête des images (avant les zones AF, donc fixe). */

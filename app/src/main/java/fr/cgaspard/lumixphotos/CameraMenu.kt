@@ -205,9 +205,6 @@ enum class ShootingMode(val short: String, val label: String) {
     CREATIVE("Créatif", "Commande créative"),
     VIDEO("Vidéo", "Vidéo créative");
 
-    val apertureEditable get() = this == APERTURE || this == MANUAL
-    val shutterEditable get() = this == SHUTTER || this == MANUAL
-
     companion object {
         fun detect(enabled: Set<String>): ShootingMode? = when {
             enabled.isEmpty() -> null
