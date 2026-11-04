@@ -1,21 +1,20 @@
 package fr.cgaspard.lumixphotos
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.exifinterface.media.ExifInterface
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.IOException
-import java.io.InputStream
+import java.io.OutputStream
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 
 /** Enregistre les fichiers dans la galerie, sans permission de stockage (Android 10+). */
 object MediaSaver {
@@ -31,8 +30,8 @@ object MediaSaver {
     private val LEGACY_DIRS = listOf("${Environment.DIRECTORY_PICTURES}/Lumix", "${Environment.DIRECTORY_MOVIES}/Lumix")
 
     /**
-     * Copie [firstStream] dans la galerie. Si la connexion coupe en cours de route, [reopen] est
-     * appelé avec le nombre d'octets déjà reçus pour reprendre là où on en était.
+     * Crée le fichier dans la galerie et y fait écrire le contenu par [write] (le réseau est géré
+     * par l'appelant), puis corrige les dates avant de le rendre visible.
      */
     suspend fun save(
         context: Context,
@@ -41,10 +40,7 @@ object MediaSaver {
         takenAt: LocalDateTime?,
         /** Orientation EXIF annoncée par l'appareil (les aperçus réduits n'ont pas d'EXIF). */
         rotation: Int,
-        totalBytes: Long,
-        firstStream: InputStream,
-        reopen: suspend (offset: Long) -> InputStream,
-        onProgress: (bytesCopied: Long) -> Unit,
+        write: suspend (OutputStream) -> Unit,
     ): Uri {
         val (collection, path) = when {
             item.mimeType == "image/jpeg" ->
@@ -64,47 +60,7 @@ object MediaSaver {
         val resolver = context.contentResolver
         val uri = resolver.insert(collection, values) ?: error("Impossible de créer $fileName")
         try {
-            resolver.openOutputStream(uri)!!.use { out ->
-                var input = firstStream
-                try {
-                    val buf = ByteArray(64 * 1024)
-                    var copied = 0L
-                    var reported = 0L
-                    while (true) {
-                        val n = try {
-                            input.read(buf)
-                        } catch (e: IOException) {
-                            if (totalBytes <= 0) throw e
-                            -1
-                        }
-                        if (n < 0) {
-                            // Fin prématurée (coupure Wi-Fi…) : on reprend à partir du dernier octet reçu
-                            if (totalBytes > 0 && copied < totalBytes) {
-                                currentCoroutineContext().ensureActive()
-                                runCatching { input.close() }
-                                input = reopen(copied)
-                                continue
-                            }
-                            break
-                        }
-                        out.write(buf, 0, n)
-                        copied += n
-                        // Une mise à jour par Mo suffit, même pour une vidéo 4K de plusieurs centaines de Mo
-                        if (copied - reported >= 1_000_000) {
-                            reported = copied
-                            // La lecture réseau est bloquante : l'annulation se vérifie ici
-                            currentCoroutineContext().ensureActive()
-                            onProgress(copied)
-                        }
-                    }
-                    onProgress(copied)
-                    if (totalBytes > 0 && copied != totalBytes) {
-                        throw IOException("Fichier incomplet : $copied / $totalBytes octets")
-                    }
-                } finally {
-                    runCatching { input.close() }
-                }
-            }
+            resolver.openOutputStream(uri)!!.use { write(it) }
             if (takenAt != null && item.mimeType == "video/mp4") {
                 runCatching {
                     resolver.openFileDescriptor(uri, "rw")?.use { fd ->
@@ -159,29 +115,46 @@ object MediaSaver {
         if (changed) exif.saveAttributes()
     }
 
+    private val COLLECTIONS = listOf(
+        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+    )
+
+    /** Un fichier de la galerie copié par l'appli. */
+    data class LocalCopy(val uri: Uri, val size: Long, val reduced: Boolean)
+
     /**
-     * Noms (côté appareil) des fichiers réellement présents dans la galerie. Une photo effacée
-     * du téléphone redevient ainsi « à télécharger ». Sans permission de lecture, Android ne
-     * montre que les fichiers créés par l'appli : c'est justement ce qu'on veut.
+     * Copies présentes dans la galerie, par nom de fichier côté appareil. Une photo effacée du
+     * téléphone redevient ainsi « à télécharger ». Sans permission de lecture, Android ne montre
+     * que les fichiers créés par l'appli : c'est justement ce qu'on veut.
      */
-    fun downloadedNames(context: Context): Set<String> {
-        val names = HashSet<String>()
+    fun localCopies(context: Context): Map<String, List<LocalCopy>> {
+        val copies = HashMap<String, MutableList<LocalCopy>>()
         val dirs = listOf(IMAGE_DIR, VIDEO_DIR, OTHER_DIR) + LEGACY_DIRS
         val selection = dirs.joinToString(" OR ") { "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" }
         val args = dirs.map { "$it/%" }.toTypedArray()
-        for (collection in listOf(
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
-            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
-        )) {
+        val projection = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE)
+        for (collection in COLLECTIONS) {
             runCatching {
-                context.contentResolver.query(
-                    collection, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), selection, args, null,
-                )?.use { cursor ->
-                    while (cursor.moveToNext()) names += cursor.getString(0).replace("$REDUCED_SUFFIX.", ".")
+                context.contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val name = cursor.getString(1)
+                        val reduced = name.contains("$REDUCED_SUFFIX.")
+                        copies.getOrPut(name.replace("$REDUCED_SUFFIX.", ".")) { mutableListOf() } +=
+                            LocalCopy(ContentUris.withAppendedId(collection, cursor.getLong(0)), cursor.getLong(2), reduced)
+                    }
                 }
             }
         }
-        return names
+        return copies
     }
+
+    /**
+     * La copie correspond-elle bien à ce fichier de l'appareil ? Avec plusieurs cartes SD, deux
+     * fichiers différents peuvent porter le même nom : on compare aussi la taille (à quelques Ko
+     * près, l'appli complétant l'EXIF des photos). Une copie réduite compte comme téléchargée.
+     */
+    fun matches(copy: LocalCopy, originalSize: Long): Boolean =
+        copy.reduced || originalSize <= 0 || abs(copy.size - originalSize) <= 16 * 1024
 }

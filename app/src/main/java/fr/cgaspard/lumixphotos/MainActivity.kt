@@ -1,6 +1,7 @@
 package fr.cgaspard.lumixphotos
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -16,7 +17,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -101,6 +104,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -495,7 +499,7 @@ private fun PhotoGrid(gallery: Gallery, s: UiState, vm: CameraSession, openViewe
                     is FileEntry -> Thumbnail(
                         item = entry.item,
                         selected = entry.item.id in s.selected,
-                        downloaded = vm.isDownloaded(entry.item, s),
+                        downloaded = s.isDownloaded(entry.item),
                         compact = s.columns >= 6,
                         vm = vm,
                         modifier = Modifier.aspectRatio(1f).clickable { vm.toggle(entry.item) },
@@ -595,7 +599,7 @@ private fun DetailRow(item: CameraItem, s: UiState, vm: CameraSession) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(item.title, style = MaterialTheme.typography.bodyLarge)
                 item.videoFormat?.let { Badge(it, Modifier.padding(start = 6.dp)) }
-                if (vm.isDownloaded(item, s)) {
+                if (s.isDownloaded(item)) {
                     Icon(
                         Icons.Default.CloudDone, "Déjà téléchargé",
                         tint = MaterialTheme.colorScheme.primary,
@@ -689,10 +693,9 @@ private fun Viewer(items: List<CameraItem>, start: Int, s: UiState, vm: CameraSe
                 val preview by produceState<ImageBitmap?>(null, item.previewUrl) { value = vm.preview(item) }
                 val thumb by produceState<ImageBitmap?>(null, item.thumbnailUrl) { value = vm.thumbnail(item) }
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    // La vignette, déjà en cache, sert de fond flou le temps de charger l'aperçu
-                    (preview ?: thumb)?.let {
-                        Image(it, contentDescription = item.title, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-                    }
+                    // La vignette, déjà en cache, s'affiche le temps de charger l'aperçu
+                    preview?.let { ZoomableImage(it, item.title) }
+                        ?: thumb?.let { Image(it, contentDescription = item.title, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
                     if (preview == null) CircularProgressIndicator(color = Color.White)
                     if (item.isVideo) {
                         Icon(Icons.Default.PlayCircle, null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(72.dp))
@@ -732,8 +735,21 @@ private fun Viewer(items: List<CameraItem>, start: Int, s: UiState, vm: CameraSe
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("${pager.currentPage + 1} / ${items.size}", color = Color.White, modifier = Modifier.weight(1f))
-                if (vm.isDownloaded(item, s)) {
-                    Icon(Icons.Default.CloudDone, "Déjà téléchargé", tint = Color.White, modifier = Modifier.padding(end = 12.dp))
+                s.localCopy(item)?.let { copy ->
+                    val context = LocalContext.current
+                    // Ouvre la copie du téléphone : seule façon de lire une vidéo (trop lent en Wi-Fi)
+                    TextButton(onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW)
+                                    .setDataAndType(copy.uri, item.mimeType)
+                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            )
+                        }
+                    }) {
+                        Icon(Icons.Default.CloudDone, null, tint = Color.White)
+                        Text("  Ouvrir", color = Color.White)
+                    }
                 }
                 val selected = item.id in s.selected
                 FilledTonalButton(onClick = { vm.toggle(item) }) {
@@ -744,6 +760,65 @@ private fun Viewer(items: List<CameraItem>, start: Int, s: UiState, vm: CameraSe
         }
     }
 }
+
+/**
+ * Image du plein écran : pincer ou double appui pour zoomer, glisser pour se déplacer. Tant
+ * qu'on n'a pas zoomé, un glissement à un doigt reste pour le changement de page.
+ */
+@Composable
+private fun ZoomableImage(bitmap: ImageBitmap, description: String) {
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val width = constraints.maxWidth.toFloat()
+        val height = constraints.maxHeight.toFloat()
+        fun clamp(o: Offset, s: Float): Offset {
+            val maxX = width * (s - 1) / 2
+            val maxY = height * (s - 1) / 2
+            return Offset(o.x.coerceIn(-maxX, maxX), o.y.coerceIn(-maxY, maxY))
+        }
+        Image(
+            bitmap,
+            contentDescription = description,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(onDoubleTap = { tap ->
+                        if (scale > 1f) {
+                            scale = 1f
+                            offset = Offset.Zero
+                        } else {
+                            scale = DOUBLE_TAP_ZOOM
+                            offset = clamp((Offset(width / 2, height / 2) - tap) * (DOUBLE_TAP_ZOOM - 1), DOUBLE_TAP_ZOOM)
+                        }
+                    })
+                }
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.count { it.pressed } >= 2 || scale > 1f) {
+                                val newScale = (scale * event.calculateZoom()).coerceIn(1f, 5f)
+                                offset = if (newScale == 1f) Offset.Zero else clamp(offset + event.calculatePan(), newScale)
+                                scale = newScale
+                                event.changes.forEach { it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
+                }
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+        )
+    }
+}
+
+private const val DOUBLE_TAP_ZOOM = 2.5f
 
 /** Pincer pour changer le nombre de colonnes, sans gêner le défilement à un doigt. */
 private fun Modifier.pinchToZoom(onStep: (zoomIn: Boolean) -> Unit): Modifier = pointerInput(Unit) {
@@ -866,7 +941,7 @@ private fun SelectionMenu(s: UiState, vm: CameraSession) {
     val visible = s.visibleItems
     val photos = visible.count { !it.isVideo }
     val videos = visible.size - photos
-    val fresh = visible.count { it.title !in s.downloaded }
+    val fresh = visible.count { !s.isDownloaded(it) }
     Box {
         TextButton(onClick = { open = true }) { Text("Sélection ▾") }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -929,29 +1004,51 @@ private fun DownloadProgressPanel(d: DownloadProgress, vm: CameraSession) {
 @Composable
 private fun DownloadDialog(plan: DownloadPlan, battery: Battery?, vm: CameraSession) {
     var reduced by remember { mutableStateOf(false) }
-    val bytes = if (reduced) plan.reducedBytes else plan.originalBytes
+    // Par défaut, on ne recopie pas ce qui est déjà sur le téléphone (cela créerait des doublons)
+    var skipExisting by remember { mutableStateOf(true) }
+    val items = plan.items(skipExisting)
+    val photos = items.count { !it.isVideo }
+    val bytes = plan.bytes(skipExisting, reduced)
     val seconds = bytes / plan.bytesPerSecond.coerceAtLeast(1)
+    val enoughSpace = bytes + DownloadPlan.FREE_SPACE_MARGIN <= plan.freeBytes
     val context = LocalContext.current
     // Pour suivre la progression dans les notifications quand l'appli est en arrière-plan
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     AlertDialog(
         onDismissRequest = vm::dismissPlan,
-        title = { Text("Télécharger ${plan.items.size} fichier(s)") },
+        title = { Text("Télécharger ${items.size} fichier(s)") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("${plan.photoCount} photo(s), ${plan.videoCount} vidéo(s)")
-                if (plan.photoCount > 0) {
+                Text("$photos photo(s), ${items.size - photos} vidéo(s)")
+                if (plan.alreadyDownloaded.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { skipExisting = !skipExisting },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = skipExisting, onCheckedChange = { skipExisting = it })
+                        Text("Ignorer les ${plan.alreadyDownloaded.size} fichier(s) déjà sur le téléphone")
+                    }
+                }
+                if (photos > 0) {
                     Text("Photos :", fontWeight = FontWeight.SemiBold)
                     QualityOption("Taille originale", selected = !reduced) { reduced = false }
                     QualityOption("Taille réduite (1620×1080, ~1 Mo, environ 8× plus rapide)", selected = reduced) { reduced = true }
                 }
-                val unknown = if (plan.unknownSizes > 0 && !reduced) " (taille encore inconnue pour ${plan.unknownSizes} fichier(s))" else ""
-                Text("≈ ${formatSize(bytes)}$unknown")
+                val unknown = plan.unknownSizes(skipExisting)
+                Text("≈ ${formatSize(bytes)}" + if (unknown > 0 && !reduced) " (taille encore inconnue pour $unknown fichier(s))" else "")
                 Text(
                     "Durée estimée : ~${formatDuration(seconds)} à ${formatSize(plan.bytesPerSecond)}/s. " +
                         "Le transfert continue si vous quittez l'appli, et reprend tout seul après une coupure Wi-Fi.",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (!enoughSpace) {
+                    Text(
+                        "Espace insuffisant sur le téléphone : ${formatSize(plan.freeBytes)} libres. " +
+                            "Sélectionnez moins de fichiers ou choisissez la taille réduite.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 if (battery?.low == true && seconds > 300) {
                     Text(
                         "Batterie de l'appareil faible ($battery) : le transfert risque d'être interrompu.",
@@ -962,14 +1059,17 @@ private fun DownloadDialog(plan: DownloadPlan, battery: Battery?, vm: CameraSess
             }
         },
         confirmButton = {
-            Button(onClick = {
-                if (Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                }
-                vm.startDownload(reduced)
-            }) { Text("Télécharger") }
+            Button(
+                enabled = items.isNotEmpty() && enoughSpace,
+                onClick = {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                    vm.startDownload(reduced, skipExisting)
+                },
+            ) { Text("Télécharger") }
         },
         dismissButton = { TextButton(onClick = vm::dismissPlan) { Text("Annuler") } },
     )

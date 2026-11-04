@@ -7,6 +7,7 @@ import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.UUID
 
 private val DAY_FORMAT = DateTimeFormatter.ofPattern("EEEE d MMMM yyyy", Locale.FRENCH)
 private val MONTH_FORMAT = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.FRENCH)
@@ -74,11 +75,62 @@ class Gallery(val entries: List<GalleryEntry>, private val headerOf: IntArray) {
     }
 }
 
-/** Mémorise date/taille/orientation par nom de fichier : on ne les redemande pas à l'appareil. */
+/**
+ * Mémorise date/taille/orientation des fichiers pour ne pas les redemander à l'appareil.
+ *
+ * Une table par carte SD : plusieurs cartes utilisées dans le même appareil peuvent contenir
+ * des fichiers de même nom. À la connexion, on reconnaît la carte en vérifiant auprès de
+ * l'appareil quelques fichiers de chaque table connue.
+ */
 class MetaCache(context: Context) {
-    private val file = File(context.filesDir, "meta.tsv")
+    private val root = File(context.filesDir, "meta")
+    // Cache unique des premières versions, avant la gestion de plusieurs cartes
+    private val legacy = File(context.filesDir, "meta.tsv")
+    private var current: File? = null
 
-    fun load(): Map<String, FileMeta> = runCatching {
+    suspend fun selectCard(
+        camera: String,
+        items: List<CameraItem>,
+        check: suspend (CameraItem) -> FileMeta?,
+    ): Map<String, FileMeta> {
+        val dir = File(root, camera.replace(Regex("[^A-Za-z0-9_-]"), "_")).apply { mkdirs() }
+        if (legacy.exists()) legacy.renameTo(File(dir, "${UUID.randomUUID()}.tsv"))
+        val byTitle = items.associateBy { it.title }
+        val tables = dir.listFiles { f -> f.name.endsWith(".tsv") }.orEmpty().sortedByDescending { it.lastModified() }
+        for (file in tables) {
+            val table = read(file)
+            val common = table.keys.filter { it in byTitle }.sorted()
+            if (common.isEmpty()) continue
+            val count = minOf(SAMPLE_SIZE, common.size)
+            val sample = (0 until count).map { common[it * common.size / count] }
+            val same = sample.all { title ->
+                val cached = table.getValue(title)
+                check(byTitle.getValue(title))?.let { it.size == cached.size && it.date == cached.date } == true
+            }
+            if (same) {
+                current = file
+                return table
+            }
+        }
+        current = File(dir, "${UUID.randomUUID()}.tsv")
+        return emptyMap()
+    }
+
+    fun save(meta: Map<String, FileMeta>) {
+        val file = current ?: return
+        val tmp = File(file.path + ".tmp")
+        tmp.bufferedWriter().use { w ->
+            for ((name, m) in meta) {
+                w.append(name).append('\t')
+                    .append(m.date?.toEpochSecond(ZoneOffset.UTC)?.toString() ?: "").append('\t')
+                    .append(m.size.toString()).append('\t')
+                    .append(m.rotation.toString()).append('\n')
+            }
+        }
+        tmp.renameTo(file)
+    }
+
+    private fun read(file: File): Map<String, FileMeta> = runCatching {
         file.readLines().mapNotNull { line ->
             val p = line.split('\t')
             if (p.size < 4) return@mapNotNull null
@@ -90,17 +142,9 @@ class MetaCache(context: Context) {
         }.toMap()
     }.getOrDefault(emptyMap())
 
-    fun save(meta: Map<String, FileMeta>) {
-        val tmp = File(file.path + ".tmp")
-        tmp.bufferedWriter().use { w ->
-            for ((name, m) in meta) {
-                w.append(name).append('\t')
-                    .append(m.date?.toEpochSecond(ZoneOffset.UTC)?.toString() ?: "").append('\t')
-                    .append(m.size.toString()).append('\t')
-                    .append(m.rotation.toString()).append('\n')
-            }
-        }
-        tmp.renameTo(file)
+    private companion object {
+        /** Fichiers vérifiés par table : quelques requêtes HEAD, moins d'une seconde. */
+        const val SAMPLE_SIZE = 4
     }
 }
 

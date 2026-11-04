@@ -8,6 +8,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.ConnectivityManager
 import android.os.Build
+import android.os.Environment
+import android.os.StatFs
 import android.os.SystemClock
 import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
@@ -18,7 +20,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +33,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.io.OutputStream
 import java.util.UUID
 
 sealed interface ConnectionState {
@@ -50,13 +55,29 @@ enum class DisplayFilter(val label: String) {
 /** Ce que l'utilisateur s'apprête à télécharger, pour la fenêtre de confirmation. */
 data class DownloadPlan(
     val items: List<CameraItem>,
-    val photoCount: Int,
-    val videoCount: Int,
-    val originalBytes: Long,
-    val unknownSizes: Int,
-    val reducedBytes: Long,
+    /** Taille de l'original par fichier (-1 si encore inconnue). */
+    val sizes: Map<String, Long>,
+    /** Fichiers déjà présents dans la galerie du téléphone. */
+    val alreadyDownloaded: Set<String>,
     val bytesPerSecond: Long,
-)
+    /** Espace libre sur le téléphone. */
+    val freeBytes: Long,
+) {
+    fun items(skipExisting: Boolean) = if (skipExisting) items.filter { it.id !in alreadyDownloaded } else items
+
+    fun bytes(skipExisting: Boolean, reduced: Boolean) = items(skipExisting).sumOf { item ->
+        // Les aperçus réduits pèsent ~1,1 Mo ; les vidéos restent à leur taille d'origine
+        if (reduced && item.canReduce) REDUCED_PHOTO_BYTES else sizes[item.id]?.coerceAtLeast(0) ?: 0
+    }
+
+    fun unknownSizes(skipExisting: Boolean) = items(skipExisting).count { (sizes[it.id] ?: -1) <= 0 }
+
+    companion object {
+        const val REDUCED_PHOTO_BYTES = 1_100_000L
+        /** Marge laissée libre sur le téléphone. */
+        const val FREE_SPACE_MARGIN = 300_000_000L
+    }
+}
 
 data class DownloadProgress(
     val index: Int,
@@ -90,8 +111,8 @@ data class UiState(
     /** Métadonnées connues, par nom de fichier. */
     val meta: Map<String, FileMeta> = emptyMap(),
     val selected: Set<String> = emptySet(),
-    /** Noms des fichiers présents dans la galerie du téléphone. */
-    val downloaded: Set<String> = emptySet(),
+    /** Copies présentes dans la galerie du téléphone, par nom de fichier. */
+    val localCopies: Map<String, List<MediaSaver.LocalCopy>> = emptyMap(),
     val viewMode: ViewMode = ViewMode.GRID,
     val columns: Int = 3,
     val filter: DisplayFilter = DisplayFilter.ALL,
@@ -101,12 +122,19 @@ data class UiState(
 ) {
     val metaLoaded get() = items.count { it.title in meta }
 
+    /** Copie du téléphone correspondant à ce fichier de l'appareil (même nom et même taille). */
+    fun localCopy(item: CameraItem): MediaSaver.LocalCopy? = localCopies[item.title]
+        ?.filter { MediaSaver.matches(it, meta[item.title]?.size ?: -1) }
+        ?.minByOrNull { if (it.reduced) 1 else 0 }
+
+    fun isDownloaded(item: CameraItem) = localCopy(item) != null
+
     val visibleItems: List<CameraItem>
         get() = when (filter) {
             DisplayFilter.ALL -> items
             DisplayFilter.PHOTOS -> items.filter { !it.isVideo }
             DisplayFilter.VIDEOS -> items.filter { it.isVideo }
-            DisplayFilter.NOT_DOWNLOADED -> items.filter { it.title !in downloaded }
+            DisplayFilter.NOT_DOWNLOADED -> items.filter { !isDownloaded(it) }
         }
 }
 
@@ -148,10 +176,6 @@ class CameraSession(private val app: Application) {
     init {
         // Remplacé par la lecture de la galerie (voir refreshDownloaded)
         prefs.edit().remove("downloaded").apply()
-        scope.launch(Dispatchers.IO) {
-            val cached = metaCache.load()
-            _state.update { it.copy(meta = cached + it.meta) }
-        }
         refreshDownloaded()
     }
 
@@ -176,13 +200,16 @@ class CameraSession(private val app: Application) {
                     prefs.edit().putString(KEY_HOST, host).apply()
                     _state.update { it.copy(hostInput = host, battery = parseBattery(cameraState)) }
                     // Mémorise le nom du Wi-Fi de l'appareil pour la connexion automatique suivante
-                    c.friendlyName()?.let { name ->
-                        if (name != _state.value.wifiSsid) setWifi(name, _state.value.wifiPassword)
-                    }
+                    val cameraName = c.friendlyName()
+                    if (cameraName != null && _state.value.wifiSsid.isEmpty()) setWifi(cameraName, _state.value.wifiPassword)
                     working("Lecture de la carte SD…")
                     val items = c.listItems()
+                    working("Identification de la carte SD…")
+                    val meta = metaCache.selectCard(cameraName ?: host, items) { item ->
+                        runCatching { c.fetchMeta(item.originalUrl) }.getOrNull()
+                    }
                     _state.update {
-                        it.copy(connection = ConnectionState.Connected(host), items = items, selected = emptySet())
+                        it.copy(connection = ConnectionState.Connected(host), items = items, meta = meta, selected = emptySet())
                     }
                 }
                 startKeepAlive()
@@ -364,8 +391,8 @@ class CameraSession(private val app: Application) {
     /** Relit la galerie du téléphone : à appeler au retour dans l'appli (photos effacées entre-temps…). */
     fun refreshDownloaded() {
         scope.launch(Dispatchers.IO) {
-            val names = MediaSaver.downloadedNames(app)
-            _state.update { it.copy(downloaded = names) }
+            val copies = MediaSaver.localCopies(app)
+            _state.update { it.copy(localCopies = copies) }
         }
     }
 
@@ -415,14 +442,12 @@ class CameraSession(private val app: Application) {
     fun selectAll() = select { true }
     fun selectPhotos() = select { !it.isVideo }
     fun selectVideos() = select { it.isVideo }
-    fun selectNew() = select { it.title !in _state.value.downloaded }
+    fun selectNew() = select { !_state.value.isDownloaded(it) }
     fun clearSelection() = _state.update { it.copy(selected = emptySet()) }
 
     private fun select(predicate: (CameraItem) -> Boolean) = _state.update { s ->
         s.copy(selected = s.visibleItems.filter(predicate).mapTo(mutableSetOf()) { it.id })
     }
-
-    fun isDownloaded(item: CameraItem, s: UiState) = item.title in s.downloaded
 
     fun setViewMode(mode: ViewMode) {
         prefs.edit().putString(KEY_VIEW, mode.name).apply()
@@ -441,21 +466,14 @@ class CameraSession(private val app: Application) {
         val s = _state.value
         val items = s.items.filter { it.id in s.selected }
         if (items.isEmpty() || client == null) return
-        val sizes = items.map { s.meta[it.title]?.size ?: -1L }
-        val photos = items.count { !it.isVideo }
         _state.update {
             it.copy(
                 plan = DownloadPlan(
                     items = items,
-                    photoCount = photos,
-                    videoCount = items.size - photos,
-                    originalBytes = sizes.filter { it > 0 }.sum(),
-                    unknownSizes = sizes.count { it <= 0 },
-                    // Les aperçus réduits pèsent ~1,1 Mo ; les vidéos restent à leur taille d'origine
-                    reducedBytes = items.zip(sizes).sumOf { (item, size) ->
-                        if (item.canReduce) REDUCED_PHOTO_BYTES else size.coerceAtLeast(0)
-                    },
+                    sizes = items.associate { item -> item.id to (s.meta[item.title]?.size ?: -1L) },
+                    alreadyDownloaded = items.filter { item -> s.isDownloaded(item) }.mapTo(HashSet()) { item -> item.id },
                     bytesPerSecond = prefs.getLong(KEY_SPEED, DEFAULT_SPEED),
+                    freeBytes = StatFs(Environment.getExternalStorageDirectory().path).availableBytes,
                 )
             )
         }
@@ -463,57 +481,51 @@ class CameraSession(private val app: Application) {
 
     fun dismissPlan() = _state.update { it.copy(plan = null) }
 
-    fun startDownload(reducedPhotos: Boolean) {
+    fun startDownload(reducedPhotos: Boolean, skipExisting: Boolean) {
         val c = client ?: return
         val plan = _state.value.plan ?: return
         if (downloadJob?.isActive == true) return
-        val planned = if (reducedPhotos) plan.reducedBytes else plan.originalBytes
+        val items = plan.items(skipExisting)
+        if (items.isEmpty()) return dismissPlan()
+        val planned = plan.bytes(skipExisting, reducedPhotos)
         // Renseigné tout de suite : le service s'arrête dès qu'il ne voit plus de téléchargement
         _state.update {
-            it.copy(plan = null, download = DownloadProgress(1, plan.items.size, plan.items.first().title, plannedBytes = planned))
+            it.copy(plan = null, download = DownloadProgress(1, items.size, items.first().title, plannedBytes = planned))
         }
         downloadJob = scope.launch(Dispatchers.IO) {
             var ok = 0
             var doneBytes = 0L
             val started = SystemClock.elapsedRealtime()
             val errors = mutableListOf<String>()
-            plan.items.forEachIndexed { index, item ->
+            items.forEachIndexed { index, item ->
                 val reduced = reducedPhotos && item.canReduce
                 val url = if (reduced) item.previewUrl!! else item.originalUrl
                 val name = if (reduced) item.title.replace(".", "${MediaSaver.REDUCED_SUFFIX}.") else item.title
                 _state.update {
-                    it.copy(download = DownloadProgress(index + 1, plan.items.size, name, doneBytes = doneBytes, plannedBytes = planned))
+                    it.copy(download = DownloadProgress(index + 1, items.size, name, doneBytes = doneBytes, plannedBytes = planned))
                 }
                 try {
-                    cameraHttp.withPermit {
-                        val response = withRetries(name) { c.openStream(url, timeoutMs = 30_000) }
-                        val length = response.meta.size
-                        _state.update { s -> s.copy(download = s.download?.copy(totalBytes = length)) }
-                        MediaSaver.save(
-                            context = app,
-                            item = item,
-                            fileName = name,
-                            takenAt = response.meta.date ?: _state.value.meta[item.title]?.date,
-                            rotation = response.meta.rotation,
-                            totalBytes = length,
-                            firstStream = response.stream,
-                            reopen = { offset -> withRetries(name) { c.openStream(url, timeoutMs = 30_000, offset = offset) }.stream },
-                        ) { bytes ->
+                    // Taille, date et orientation : déjà connues pour un original, sinon une requête HEAD
+                    val known = _state.value.meta[item.title]
+                    val meta = known?.takeIf { !reduced && it.size > 0 }
+                        ?: retrying { cameraHttp.withPermit { c.fetchMeta(url) } }
+                    val length = meta.size
+                    if (length <= 0) throw IOException("taille inconnue")
+                    _state.update { s -> s.copy(download = s.download?.copy(totalBytes = length)) }
+                    val uri = MediaSaver.save(app, item, name, takenAt = known?.date ?: meta.date, rotation = meta.rotation) { out ->
+                        downloadInChunks(c, url, length, out) { bytes ->
                             val elapsed = (SystemClock.elapsedRealtime() - started).coerceAtLeast(1)
                             _state.update { s ->
-                                s.copy(
-                                    download = s.download?.copy(
-                                        bytes = bytes,
-                                        bytesPerSecond = (doneBytes + bytes) * 1000 / elapsed,
-                                        retrying = null,
-                                    )
-                                )
+                                s.copy(download = s.download?.copy(bytes = bytes, bytesPerSecond = (doneBytes + bytes) * 1000 / elapsed))
                             }
                         }
-                        doneBytes += length.coerceAtLeast(0)
                     }
+                    doneBytes += length
                     ok++
-                    _state.update { s -> s.copy(downloaded = s.downloaded + item.title, selected = s.selected - item.id) }
+                    _state.update { s ->
+                        val copies = s.localCopies[item.title].orEmpty() + MediaSaver.LocalCopy(uri, length, reduced)
+                        s.copy(localCopies = s.localCopies + (item.title to copies), selected = s.selected - item.id)
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -521,8 +533,11 @@ class CameraSession(private val app: Application) {
                 }
             }
             val seconds = (SystemClock.elapsedRealtime() - started) / 1000
-            // Débit mesuré, pour estimer la durée des prochains téléchargements
-            if (doneBytes > 20_000_000 && seconds > 0) prefs.edit().putLong(KEY_SPEED, doneBytes / seconds).apply()
+            // Débit mesuré, moyenné avec les précédents : une session perturbée ne fausse pas tout
+            if (doneBytes > 20_000_000 && seconds > 0) {
+                val previous = prefs.getLong(KEY_SPEED, DEFAULT_SPEED)
+                prefs.edit().putLong(KEY_SPEED, (previous + doneBytes / seconds) / 2).apply()
+            }
             val msg = buildString {
                 append("$ok fichier(s) enregistré(s) dans DCIM/Lumix")
                 append("\n${formatSize(doneBytes)} en ${formatDuration(seconds)}")
@@ -536,14 +551,50 @@ class CameraSession(private val app: Application) {
     }
 
     /**
+     * Télécharge par morceaux de [CHUNK_BYTES] (requêtes Range) : entre deux morceaux, l'appareil
+     * redevient disponible pour les vignettes, qui sinon resteraient bloquées pendant toute une
+     * vidéo 4K. Après une coupure, on reprend au dernier octet reçu.
+     */
+    private suspend fun downloadInChunks(c: LumixClient, url: String, length: Long, out: OutputStream, onProgress: (Long) -> Unit) {
+        var offset = 0L
+        var reported = 0L
+        val buf = ByteArray(64 * 1024)
+        while (offset < length) {
+            retrying {
+                cameraHttp.withPermit {
+                    val response = c.openStream(url, timeoutMs = 30_000, reuseConnection = true, offset = offset, length = minOf(CHUNK_BYTES, length - offset))
+                    response.stream.use { input ->
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            offset += n
+                            // Une mise à jour par Mo ; la lecture réseau étant bloquante, l'annulation se vérifie ici
+                            if (offset - reported >= 1_000_000) {
+                                reported = offset
+                                currentCoroutineContext().ensureActive()
+                                onProgress(offset)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        onProgress(offset)
+        if (offset != length) throw IOException("Fichier incomplet : $offset / $length octets")
+    }
+
+    /**
      * Réessaie [block] pendant ~3 min en cas d'erreur réseau (coupure Wi-Fi, appareil
      * momentanément injoignable), en se reliant à chaque fois au Wi-Fi courant.
      */
-    private suspend fun <T> withRetries(fileName: String, block: () -> T): T {
+    private suspend fun <T> retrying(block: suspend () -> T): T {
         var attempt = 0
         while (true) {
             try {
-                return block()
+                return block().also {
+                    if (attempt > 0) _state.update { s -> s.copy(download = s.download?.copy(retrying = null)) }
+                }
             } catch (e: IOException) {
                 if (++attempt > RETRY_DELAYS_S.size) throw e
                 val wait = RETRY_DELAYS_S[attempt - 1]
@@ -587,7 +638,8 @@ class CameraSession(private val app: Application) {
         private const val KEY_SPEED = "bytes_per_second"
         // Débit mesuré sur un FZ1000, connexion directe
         private const val DEFAULT_SPEED = 2_000_000L
-        private const val REDUCED_PHOTO_BYTES = 1_100_000L
+        /** ~4 s de transfert : les vignettes n'attendent jamais plus longtemps. */
+        private const val CHUNK_BYTES = 8L * 1024 * 1024
         private val RETRY_DELAYS_S = listOf(2, 3, 5, 10, 15, 20, 30, 30, 30, 30)
     }
 }

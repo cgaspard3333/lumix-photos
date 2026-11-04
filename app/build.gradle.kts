@@ -12,16 +12,29 @@ android {
         applicationId = "fr.cgaspard.lumixphotos"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+    }
+
+    // Clé de signature hors du dépôt : ~/.gradle/gradle.properties en local, secrets GitHub en CI
+    val keystore = providers.gradleProperty("LUMIX_KEYSTORE").orNull
+    signingConfigs {
+        if (keystore != null) {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = providers.gradleProperty("LUMIX_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.gradleProperty("LUMIX_KEY_ALIAS").get()
+                keyPassword = storePassword
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            // Signée avec la clé debug pour pouvoir l'installer directement
-            signingConfig = signingConfigs.getByName("debug")
+            // Sans la clé (simple clone du dépôt), on signe avec la clé debug pour pouvoir installer l'APK
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -49,4 +62,6 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     // Scanner de QR code fourni par Google Play Services : pas de permission caméra à demander
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

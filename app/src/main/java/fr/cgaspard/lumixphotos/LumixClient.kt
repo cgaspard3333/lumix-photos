@@ -176,13 +176,16 @@ class LumixClient(val host: String) {
         url: String,
         timeoutMs: Int = 30_000,
         reuseConnection: Boolean = false,
-        /** Reprise d'un téléchargement interrompu : l'appareil gère les requêtes Range. */
+        /** Début de la plage voulue : l'appareil gère les requêtes Range. */
         offset: Long = 0,
+        /** Taille maximale de la plage (téléchargement par morceaux), ou null jusqu'à la fin. */
+        length: Long? = null,
     ): CameraResponse {
         val conn = open(url, timeoutMs)
         if (!reuseConnection) conn.setRequestProperty("Connection", "close")
-        if (offset > 0) conn.setRequestProperty("Range", "bytes=$offset-")
-        val ok = if (offset > 0) {
+        val ranged = offset > 0 || length != null
+        if (ranged) conn.setRequestProperty("Range", "bytes=$offset-${length?.let { offset + it - 1 } ?: ""}")
+        val ok = if (ranged) {
             // Sans 206 + bon Content-Range, on recopierait le début du fichier à la suite
             conn.responseCode == 206 && conn.getHeaderField("Content-Range")?.startsWith("bytes $offset-") == true
         } else {

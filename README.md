@@ -4,6 +4,12 @@ Application Android pour récupérer les photos et vidéos d'un appareil Panason
 sans passer par l'application Panasonic. Développée et testée avec un **DMC-FZ1000** (firmware 2.60)
 et un téléphone sous Android 14.
 
+## Installation
+
+Téléchargez l'APK de la dernière version dans les
+[releases](https://github.com/cgaspard3333/lumix-photos/releases), puis ouvrez-le sur le téléphone
+(Android 10 ou plus récent).
+
 ## Fonctionnalités
 
 - **Connexion par QR code** : scanner le QR code affiché par l'appareil suffit. Le téléphone
@@ -12,8 +18,12 @@ et un téléphone sous Android 14.
   (nom, date, taille, type, 4K/1080p), défilement rapide par mois, filtre photos/vidéos/non téléchargés.
 - **Sélection** : par jour, par type, « pas encore téléchargés », ou appui long puis glisser.
 - **Plein écran** : appui long sur une vignette.
-- **Téléchargement** en arrière-plan avec notification, reprise automatique après une coupure
-  Wi-Fi, photos en taille originale ou réduite (1620×1080, environ 8× plus rapide).
+- **Téléchargement** en arrière-plan avec notification, par morceaux de 8 Mo (les vignettes
+  restent fluides pendant une vidéo 4K), reprise automatique après une coupure Wi-Fi, photos en
+  taille originale ou réduite (1620×1080, environ 8× plus rapide). Les fichiers déjà présents sur
+  le téléphone sont ignorés, et l'espace libre est vérifié avant de commencer.
+- **Plusieurs cartes SD** : chaque carte est reconnue à la connexion, avec son propre cache des
+  dates et tailles.
 - Les fichiers sont rangés dans `DCIM/Lumix/Image` et `DCIM/Lumix/Video`, avec la bonne date de
   prise de vue.
 
@@ -42,8 +52,14 @@ Elle ne fait **que lire** la carte SD : aucune suppression ni modification des f
 JDK 17 ou plus récent, et SDK Android 36 :
 
 ```sh
-./gradlew assembleRelease
+./gradlew testDebugUnitTest assembleRelease
 ```
 
-L'APK est produit dans `app/build/outputs/apk/release/`. Il est signé avec la clé de débogage,
-pour pouvoir l'installer directement (`adb install`).
+L'APK est produit dans `app/build/outputs/apk/release/`. Sans clé de signature configurée, il est
+signé avec la clé de débogage, pour pouvoir l'installer directement (`adb install`).
+
+Pour signer avec la clé de publication, ajouter dans `~/.gradle/gradle.properties` (hors du dépôt) :
+`LUMIX_KEYSTORE`, `LUMIX_KEYSTORE_PASSWORD` et `LUMIX_KEY_ALIAS`.
+
+GitHub Actions lance les tests et construit l'APK à chaque modification ; un tag `v*` publie une
+release. La signature utilise les secrets `LUMIX_KEYSTORE_BASE64` et `LUMIX_KEYSTORE_PASSWORD`.
