@@ -1,6 +1,8 @@
 package fr.cgaspard.lumixphotos
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.os.SystemClock
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -109,6 +111,8 @@ class RemoteController(
     private var pollJob: Job? = null
     private var startJob: Job? = null
     @Volatile private var lastFrameAt = 0L
+    /** Orientation de l'appareil lue dans la visée (code EXIF), pour redresser l'image affichée. */
+    @Volatile private var orientation = 1
     @Volatile private var streaming = false
     /** Le menu complet ne change pas pendant une session : lu une seule fois. */
     private var menu: List<CameraSetting>? = null
@@ -226,8 +230,10 @@ class RemoteController(
             }
             val soi = (0 until packet.length - 1).firstOrNull { buf[it] == 0xFF.toByte() && buf[it + 1] == 0xD8.toByte() } ?: continue
             readFocal(buf, soi)
+            // Orientation de l'appareil (code EXIF : 1 horizontal, 6 et 8 vertical, 3 retourné)
+            if (soi > ORIENTATION_OFFSET) orientation = buf[ORIENTATION_OFFSET].toInt() and 0xFF
             val bitmap = BitmapFactory.decodeByteArray(buf, soi, packet.length - soi) ?: continue
-            _frame.value = bitmap.asImageBitmap()
+            _frame.value = bitmap.rotatedFor(orientation).asImageBitmap()
             lastFrameAt = SystemClock.elapsedRealtime()
         }
     }
@@ -435,8 +441,19 @@ class RemoteController(
         if (zoomJob?.isActive != true) _zoomTarget.value = null
     }
 
-    /** [x] et [y] entre 0 et 1 sur l'image de la visée. */
-    fun focusAt(x: Float, y: Float) = command { it.touchFocus((x * 1000).toInt().coerceIn(0, 1000), (y * 1000).toInt().coerceIn(0, 1000)) }
+    /**
+     * [u] et [v] entre 0 et 1 sur la visée telle qu'affichée ; l'appareil attend des coordonnées
+     * dans le repère de son capteur, qu'on retrouve en annulant la rotation d'affichage.
+     */
+    fun focusAt(u: Float, v: Float) {
+        val (x, y) = when (orientation) {
+            6 -> v to 1 - u
+            8 -> 1 - v to u
+            3 -> 1 - u to 1 - v
+            else -> u to v
+        }
+        command { it.touchFocus((x * 1000).toInt().coerceIn(0, 1000), (y * 1000).toInt().coerceIn(0, 1000)) }
+    }
 
     fun set(setting: CameraSetting, option: SettingOption) {
         // Affichage immédiat, confirmé ensuite par l'appareil
@@ -469,9 +486,21 @@ class RemoteController(
         }
     }
 
+    private fun Bitmap.rotatedFor(exifOrientation: Int): Bitmap {
+        val degrees = when (exifOrientation) {
+            6 -> 90f
+            8 -> 270f
+            3 -> 180f
+            else -> return this
+        }
+        return Bitmap.createBitmap(this, 0, 0, width, height, Matrix().apply { postRotate(degrees) }, true)
+    }
+
     private companion object {
         const val PREFERRED_PORT = 49199
         const val FOCAL_FROM_END = 78
+        /** Position de l'orientation dans l'en-tête des images (avant les zones AF, donc fixe). */
+        const val ORIENTATION_OFFSET = 42
         /** Temps (s) pendant lequel l'objectif continue après l'ordre d'arrêt, retard de la visée compris. */
         const val ZOOM_LEAD_S = 0.3
         /** Écarts en log de focale : arrêt anticipé à ±2 %, tolérance finale ±5 %, rapide au-delà de ±50 %. */
