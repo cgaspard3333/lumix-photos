@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- L'appareil ne parle que HTTP en clair sur le réseau local -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
