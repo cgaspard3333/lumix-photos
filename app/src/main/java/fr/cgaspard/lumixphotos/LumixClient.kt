@@ -67,9 +67,20 @@ class LumixClient(val host: String) {
         runCatching {
             camCommand("mode=accctrl&type=req_acc&value=$deviceId&value2=${deviceName.urlEncode()}")
         }
-        val state = camCommand("mode=getstate")
-        if (!state.contains("<result>ok</result>")) {
-            throw IOException("Réponse inattendue de l'appareil : $state")
+        // « err_busy » : l'appareil finit une autre tâche (menu ouvert, session précédente pas encore
+        // libérée…). Ça se débloque en général en quelques secondes.
+        var state = camCommand("mode=getstate")
+        repeat(BUSY_RETRIES) {
+            if (!state.contains("<result>err_busy</result>")) return@repeat
+            Thread.sleep(BUSY_RETRY_DELAY_MS)
+            state = camCommand("mode=getstate")
+        }
+        when {
+            state.contains("<result>err_busy</result>") -> throw IOException(
+                "L'appareil est occupé. Fermez le menu affiché sur son écran, vérifiez qu'aucun autre " +
+                    "téléphone n'y est connecté, puis réessayez."
+            )
+            !state.contains("<result>ok</result>") -> throw IOException("Réponse inattendue de l'appareil : $state")
         }
         camCommand("mode=camcmd&value=playmode")
         return state
@@ -232,6 +243,8 @@ class LumixClient(val host: String) {
 
     companion object {
         private const val TAG = "LumixClient"
+        private const val BUSY_RETRIES = 8
+        private const val BUSY_RETRY_DELAY_MS = 2_000L
         // L'appareil plafonne de toute façon à 50 éléments par page
         private const val PAGE_SIZE = 50
 

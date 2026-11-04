@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -58,10 +60,13 @@ internal fun ConnectScreen(s: UiState, vm: CameraSession) {
     var scanError by remember { mutableStateOf<String?>(null) }
     val connect = { vm.setWifi(ssid, password); vm.connect() }
 
+    // Sur tablette, contenu centré et limité en largeur plutôt qu'étiré d'un bord à l'autre
     Column(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .wrapContentWidth()
+            .widthIn(max = 560.dp)
             .padding(horizontal = 24.dp, vertical = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp),

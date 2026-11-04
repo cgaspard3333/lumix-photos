@@ -85,6 +85,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
+/** Taille des vignettes pour un niveau de zoom exprimé en « colonnes sur un téléphone » (360 dp de large). */
+private fun thumbnailSize(phoneColumns: Int) = (360f / phoneColumns).dp
+
 /** Fichiers de la section qui commence à l'en-tête [headerIndex]. */
 private fun Gallery.itemsOfSection(headerIndex: Int): List<CameraItem> =
     entries.asSequence().drop(headerIndex + 1).takeWhile { it is FileEntry }.map { (it as FileEntry).item }.toList()
@@ -205,7 +208,9 @@ internal fun PhotoGrid(gallery: Gallery, s: UiState, vm: CameraSession, openView
             .pinchToZoom { zoomIn -> vm.setColumns(if (zoomIn) columns - 1 else columns + 1) }
     ) {
         LazyVerticalGrid(
-            columns = GridCells.Fixed(s.columns),
+            // Le zoom règle la taille des vignettes ; le nombre de colonnes suit la largeur de l'écran
+            // (même rendu qu'avant sur un téléphone, plus de colonnes sur une tablette)
+            columns = GridCells.Adaptive(thumbnailSize(s.columns)),
             state = state,
             modifier = Modifier
                 .fillMaxSize()

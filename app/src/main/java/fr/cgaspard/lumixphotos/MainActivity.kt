@@ -45,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,8 +77,8 @@ private fun App(vm: CameraSession) {
     val connected = s.connection is ConnectionState.Connected
     val visible = s.visibleItems
     val gallery = remember(visible, s.meta) { Gallery.build(visible, s.meta) }
-    // Index (dans la liste affichée) du fichier ouvert en plein écran
-    var viewerIndex by remember { mutableStateOf<Int?>(null) }
+    // Index (dans la liste affichée) du fichier ouvert en plein écran ; conservé quand on tourne l'écran
+    var viewerIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     // Au retour dans l'appli : des photos ont pu être effacées de la galerie entre-temps
