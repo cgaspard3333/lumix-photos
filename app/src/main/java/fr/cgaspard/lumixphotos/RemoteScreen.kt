@@ -1,5 +1,9 @@
 package fr.cgaspard.lumixphotos
 
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.verticalScroll
@@ -765,7 +769,25 @@ private fun ZoomButton(remote: RemoteController, tele: Boolean) {
 private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet, onChange: (Sheet) -> Unit, onDismiss: () -> Unit) {
     // Toujours ouverte en entier : la position « à mi-hauteur » est recalculée à chaque rafraîchissement
     // des valeurs (chaque seconde) et faisait sautiller la feuille
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    // Hauteur bornée et indépendante des barres système : la prise de vue les masque, la fenêtre de la
+    // feuille les réaffiche, et une feuille presque aussi haute que l'écran oscillait entre les deux
+    val maxSheetHeight = LocalConfiguration.current.screenHeightDp.dp * 0.8f
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        contentWindowInsets = { WindowInsets(0) },
+    ) {
+        // La feuille a sa propre fenêtre : on y masque aussi les barres système, comme sur la prise de vue
+        val sheetView = LocalView.current
+        DisposableEffect(sheetView) {
+            val window = (sheetView.parent as? DialogWindowProvider)?.window
+            window?.let { WindowCompat.getInsetsController(it, sheetView) }?.apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+            onDispose { }
+        }
+        Box(Modifier.heightIn(max = maxSheetHeight)) {
         when (sheet) {
             Sheet.All -> LazyColumn(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                 item(key = "hint") {
@@ -823,6 +845,7 @@ private fun SettingsSheet(r: RemoteState, remote: RemoteController, sheet: Sheet
                     }
                 }
             }
+        }
         }
     }
 }
